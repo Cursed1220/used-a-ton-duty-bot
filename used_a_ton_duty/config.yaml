@@ -8,3 +8,6 @@ init: false
 
 arch:
   - aarch64
+
+map:
+  - addon_config:rw
