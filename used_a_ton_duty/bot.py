@@ -27,7 +27,7 @@ LOA_CHANNEL_ID = 1553340731089752074
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Africa/Johannesburg"))
 
-DB = "duty.db"
+DB = "/data/duty.db"
 
 
 # ==============================
