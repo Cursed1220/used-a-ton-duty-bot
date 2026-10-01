@@ -1,0 +1,10 @@
+name: Used-A-Ton Duty Bot
+version: "1.0.1"
+slug: used_a_ton_duty
+description: Used-A-Ton Discord Duty Bot
+startup: application
+boot: auto
+init: false
+
+arch:
+  - aarch64
