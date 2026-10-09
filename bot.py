@@ -712,7 +712,7 @@ def daily_seconds_for_user(user_id: int, day_start: datetime, day_end: datetime)
     return total
 
 
-@tasks.loop(time=time(20, 30, tzinfo=TZ))
+@tasks.loop(time=time(23, 59, tzinfo=TZ))
 async def daily_roster_report():
     if not DAILY_ROSTER_WEBHOOK_URL:
         print("Daily roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
@@ -747,12 +747,15 @@ async def daily_roster_report():
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 member = None
         name = member.display_name if member else f"Discord user {user_id}"
-        lines.append((name.casefold(), f"**{discord.utils.escape_markdown(name)}**\nTotal: {fmt_duration(seconds)}"))
+        lines.append((
+            name.casefold(),
+            f"**{discord.utils.escape_markdown(name)}**\\nTotal Shift: {fmt_duration(seconds)}"
+        ))
 
     lines.sort(key=lambda item: item[0])
-    content = "\n\n".join(line for _, line in lines)
-    if not content:
-        content = "No staff hours recorded today."
+    heading = f"**({now:%A - %d/%m/%Y}): 00:00 - 23:59**"
+    roster = "\\n\\n".join(line for _, line in lines)
+    content = f"{heading}\\n\\n{roster}" if roster else f"{heading}\\n\\nNo staff hours recorded today."
 
     try:
         webhook = discord.Webhook.from_url(DAILY_ROSTER_WEBHOOK_URL, client=bot)
