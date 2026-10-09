@@ -746,12 +746,11 @@ async def daily_roster_report():
                 member = await guild.fetch_member(user_id)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 member = None
-            name = member.display_name if member else f"Discord user {user_id}"
-        message = (
-            f"**{discord.utils.escape_markdown(name)}**\n"
-            f"Total Shift: {fmt_duration(seconds)}"
-        )
-        lines.append((name.casefold(), message))
+        name = member.display_name if member else f"Discord user {user_id}"
+        lines.append((
+            name.casefold(),
+            f"**{discord.utils.escape_markdown(name)}**\nTotal Shift: {fmt_duration(seconds)}"
+        ))
 
     lines.sort(key=lambda item: item[0])
     heading = f"**({now:%A - %d/%m/%Y}): 00:00 - 23:59**"
