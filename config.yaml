@@ -1,5 +1,6 @@
+
 name: Used-A-Ton Duty Bot
-version: "1.0.1"
+version: "1.0.2"
 slug: used_a_ton_duty
 description: Used-A-Ton Discord Duty Bot
 startup: application
@@ -8,3 +9,9 @@ init: false
 
 arch:
   - aarch64
+
+options:
+  daily_roster_webhook_url: ""
+
+schema:
+  daily_roster_webhook_url: str
