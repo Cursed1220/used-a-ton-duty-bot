@@ -697,7 +697,7 @@ def daily_seconds_for_user(user_id: int, day_start: datetime, day_end: datetime)
     return total
 
 
-@tasks.loop(time=time(23, 59, tzinfo=TZ))
+@tasks.loop(time=time(16, 50, tzinfo=TZ))
 async def daily_roster_report():
     if not DAILY_ROSTER_WEBHOOK_URL:
         print("Daily roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
