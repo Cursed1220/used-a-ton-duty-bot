@@ -746,7 +746,7 @@ async def daily_roster_report():
                 member = await guild.fetch_member(user_id)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 member = None
-               name = member.display_name if member else f"Discord user {user_id}"
+            name = member.display_name if member else f"Discord user {user_id}"
         message = (
             f"**{discord.utils.escape_markdown(name)}**\n"
             f"Total Shift: {fmt_duration(seconds)}"
