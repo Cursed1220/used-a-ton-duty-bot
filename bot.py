@@ -749,7 +749,7 @@ async def daily_roster_report():
         name = member.display_name if member else f"Discord user {user_id}"
         lines.append((
             name.casefold(),
-            f"**{discord.utils.escape_markdown(name)}**\\nTotal Shift: {fmt_duration(seconds)}"
+            f"**{discord.utils.escape_markdown(name)}**\nTotal Shift: {fmt_duration(seconds)}"
         ))
 
     lines.sort(key=lambda item: item[0])
