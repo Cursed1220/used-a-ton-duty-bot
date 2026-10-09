@@ -746,16 +746,17 @@ async def daily_roster_report():
                 member = await guild.fetch_member(user_id)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 member = None
-        name = member.display_name if member else f"Discord user {user_id}"
-        lines.append((
-            name.casefold(),
-            f"**{discord.utils.escape_markdown(name)}**\nTotal Shift: {fmt_duration(seconds)}"
-        ))
+               name = member.display_name if member else f"Discord user {user_id}"
+        message = (
+            f"**{discord.utils.escape_markdown(name)}**\n"
+            f"Total Shift: {fmt_duration(seconds)}"
+        )
+        lines.append((name.casefold(), message))
 
     lines.sort(key=lambda item: item[0])
     heading = f"**({now:%A - %d/%m/%Y}): 00:00 - 23:59**"
-    roster = "\\n\\n".join(line for _, line in lines)
-    content = f"{heading}\\n\\n{roster}" if roster else f"{heading}\\n\\nNo staff hours recorded today."
+    roster = "\n\n".join(line for _, line in lines)
+    content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded today."
 
     try:
         webhook = discord.Webhook.from_url(DAILY_ROSTER_WEBHOOK_URL, client=bot)
