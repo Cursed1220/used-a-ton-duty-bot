@@ -19,7 +19,7 @@ DUTY_LOG_CHANNEL_ID = int(os.getenv("DUTY_LOG_CHANNEL_ID", "0"))
 CLOCK_CHANNEL_ID = int(os.getenv("CLOCK_CHANNEL_ID", "0"))
 MANAGER_ROLE_ID = int(os.getenv("MANAGER_ROLE_ID", "0"))
 def load_daily_roster_webhook_url():
-    # Home Assistant add-on options are stored here when configured in config.yaml.
+    """Read the webhook from Home Assistant add-on options, with env fallback."""
     options_path = "/data/options.json"
     try:
         with open(options_path, "r", encoding="utf-8") as options_file:
@@ -29,8 +29,6 @@ def load_daily_roster_webhook_url():
             return str(value).strip()
     except (OSError, json.JSONDecodeError):
         pass
-
-    # Environment-variable fallback for other hosting setups.
     return os.getenv("DAILY_ROSTER_WEBHOOK_URL", "").strip()
 
 
@@ -45,7 +43,7 @@ LOA_CHANNEL_ID = 1553340731089752074
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Africa/Johannesburg"))
 
-DB = "/data/duty.db"
+DB = "duty.db"
 
 
 # ==============================
@@ -125,3 +123,6 @@ def peak_seconds(start, end):
             time(23, 0),
             TZ
         )
+
+        a = max(start, p1)
+        b = min(end, p2)
