@@ -126,3 +126,5 @@ def peak_seconds(start, end):
 
         a = max(start, p1)
         b = min(end, p2)
+
+        if b > a:
