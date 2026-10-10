@@ -677,9 +677,12 @@ async def force_clockout(
 # DAILY ROSTER REPORT
 # ============================================================
 
-def daily_seconds_for_user(user_id: int, day_start: datetime, day_end: datetime) -> int:
-    """Total a user's recorded duty time overlapping one local calendar day."""
-    total = 0
+def daily_shift_breakdown(user_id: int, day_start: datetime, day_end: datetime) -> tuple[int, int, int]:
+    """Return peak, non-peak, and total seconds overlapping one local calendar day.
+
+    Peak hours are 18:00–23:00 Africa/Johannesburg time. All other time is non-peak.
+    Shifts crossing midnight are split across the relevant calendar days.
+    """
     with db() as c:
         completed = c.execute(
             "SELECT clock_in, clock_out FROM shifts WHERE user_id=?",
@@ -698,18 +701,31 @@ def daily_seconds_for_user(user_id: int, day_start: datetime, day_end: datetime)
         end = datetime.fromisoformat(row["clock_out"]).astimezone(TZ)
         intervals.append((start, end))
 
-    # If still clocked in when the report runs, count the time through the end
-    # of this roster day. The active shift will be saved normally when they clock out.
+    # Include a shift that is still active when the report runs.
     if active:
         start = datetime.fromisoformat(active["clock_in"]).astimezone(TZ)
-        intervals.append((start, datetime.now(TZ)))
+        intervals.append((start, min(datetime.now(TZ), day_end)))
 
+    total_seconds = 0
+    peak_total = 0
     for start, end in intervals:
         overlap_start = max(start, day_start)
         overlap_end = min(end, day_end)
-        if overlap_end > overlap_start:
-            total += int((overlap_end - overlap_start).total_seconds())
-    return total
+        if overlap_end <= overlap_start:
+            continue
+
+        total_seconds += int((overlap_end - overlap_start).total_seconds())
+
+        # Intersect the shift with the daily peak window, 18:00 to 23:00.
+        peak_start = datetime.combine(day_start.date(), time(18, 0), TZ)
+        peak_end = datetime.combine(day_start.date(), time(23, 0), TZ)
+        peak_overlap_start = max(overlap_start, peak_start)
+        peak_overlap_end = min(overlap_end, peak_end)
+        if peak_overlap_end > peak_overlap_start:
+            peak_total += int((peak_overlap_end - peak_overlap_start).total_seconds())
+
+    non_peak_total = max(0, total_seconds - peak_total)
+    return peak_total, non_peak_total, total_seconds
 
 
 @tasks.loop(time=time(23, 59, tzinfo=TZ))
@@ -737,8 +753,10 @@ async def daily_roster_report():
 
     lines = []
     for user_id in ids:
-        seconds = daily_seconds_for_user(user_id, day_start, day_end)
-        if seconds <= 0:
+        peak_seconds_today, non_peak_seconds_today, total_seconds_today = daily_shift_breakdown(
+            user_id, day_start, day_end
+        )
+        if total_seconds_today <= 0:
             continue
         member = guild.get_member(user_id)
         if member is None:
@@ -749,7 +767,10 @@ async def daily_roster_report():
         name = member.display_name if member else f"Discord user {user_id}"
         lines.append((
             name.casefold(),
-            f"**{discord.utils.escape_markdown(name)}**\nTotal Shift: {fmt_duration(seconds)}"
+            f"**{discord.utils.escape_markdown(name)}**\n"
+            f"Peak: {fmt_duration(peak_seconds_today)}\n"
+            f"Non Peak: {fmt_duration(non_peak_seconds_today)}\n"
+            f"Total Shift: {fmt_duration(total_seconds_today)}"
         ))
 
     lines.sort(key=lambda item: item[0])
@@ -765,8 +786,112 @@ async def daily_roster_report():
         print(f"Daily roster webhook error: {e}")
 
 
+@tasks.loop(time=time(23, 59, tzinfo=TZ))
+async def weekly_roster_report():
+    """Post weekly staff totals every Sunday at 23:59 local time."""
+    now = datetime.now(TZ)
+    # Python weekday: Monday=0, Sunday=6.
+    if now.weekday() != 6:
+        return
+
+    if not DAILY_ROSTER_WEBHOOK_URL:
+        print("Weekly roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
+        return
+
+    # The reporting week starts Monday 00:00 and ends at the Sunday 23:59 run.
+    sunday = now.date()
+    monday = sunday - timedelta(days=6)
+    week_start = datetime.combine(monday, time.min, TZ)
+    week_end = now
+
+    guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
+    if guild is None:
+        print("Weekly roster skipped: bot could not find the Discord server.")
+        return
+
+    with db() as c:
+        ids = set(row[0] for row in c.execute("SELECT DISTINCT user_id FROM shifts").fetchall())
+        ids.update(row[0] for row in c.execute("SELECT user_id FROM active").fetchall())
+
+    lines = []
+    for user_id in ids:
+        with db() as c:
+            completed = c.execute(
+                "SELECT clock_in, clock_out FROM shifts WHERE user_id=?", (user_id,)
+            ).fetchall()
+            active = c.execute(
+                "SELECT clock_in FROM active WHERE user_id=?", (user_id,)
+            ).fetchone()
+
+        intervals = []
+        for row in completed:
+            if not row["clock_in"] or not row["clock_out"]:
+                continue
+            start = datetime.fromisoformat(row["clock_in"]).astimezone(TZ)
+            end = datetime.fromisoformat(row["clock_out"]).astimezone(TZ)
+            intervals.append((start, end))
+        if active:
+            start = datetime.fromisoformat(active["clock_in"]).astimezone(TZ)
+            intervals.append((start, min(now, week_end)))
+
+        total_seconds_week = 0
+        peak_seconds_week = 0
+        for start, end in intervals:
+            overlap_start = max(start, week_start)
+            overlap_end = min(end, week_end)
+            if overlap_end <= overlap_start:
+                continue
+            total_seconds_week += int((overlap_end - overlap_start).total_seconds())
+
+            current_day = overlap_start.date()
+            while current_day <= overlap_end.date():
+                peak_start = datetime.combine(current_day, time(18, 0), TZ)
+                peak_end = datetime.combine(current_day, time(23, 0), TZ)
+                peak_overlap_start = max(overlap_start, peak_start)
+                peak_overlap_end = min(overlap_end, peak_end)
+                if peak_overlap_end > peak_overlap_start:
+                    peak_seconds_week += int((peak_overlap_end - peak_overlap_start).total_seconds())
+                current_day += timedelta(days=1)
+
+        if total_seconds_week <= 0:
+            continue
+        non_peak_seconds_week = max(0, total_seconds_week - peak_seconds_week)
+
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        name = member.display_name if member else f"Discord user {user_id}"
+        message = (
+            f"**{discord.utils.escape_markdown(name)}**\n"
+            f"Peak: {fmt_duration(peak_seconds_week)}\n"
+            f"Non Peak: {fmt_duration(non_peak_seconds_week)}\n"
+            f"Total Shift: {fmt_duration(total_seconds_week)}"
+        )
+        lines.append((name.casefold(), message))
+
+    lines.sort(key=lambda item: item[0])
+    heading = f"**Weekly Staff Roster (Monday - {monday:%d/%m/%Y} to Sunday - {sunday:%d/%m/%Y}): 00:00 - 23:59**"
+    roster = "\n\n".join(line for _, line in lines)
+    content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded this week."
+
+    try:
+        webhook = discord.Webhook.from_url(DAILY_ROSTER_WEBHOOK_URL, client=bot)
+        await webhook.send(content=content, username="Used-A-Ton Weekly Roster", allowed_mentions=discord.AllowedMentions.none())
+        print(f"Weekly roster posted for {monday:%Y-%m-%d} to {sunday:%Y-%m-%d}.")
+    except Exception as e:
+        print(f"Weekly roster webhook error: {e}")
+
+
 @daily_roster_report.before_loop
 async def before_daily_roster_report():
+    await bot.wait_until_ready()
+
+
+@weekly_roster_report.before_loop
+async def before_weekly_roster_report():
     await bot.wait_until_ready()
 
 
@@ -820,6 +945,9 @@ async def on_ready():
 
     if not daily_roster_report.is_running():
         daily_roster_report.start()
+
+    if not weekly_roster_report.is_running():
+        weekly_roster_report.start()
 
 
 # ============================================================
