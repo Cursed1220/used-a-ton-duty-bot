@@ -93,6 +93,15 @@ def init_db():
             )
         """)
 
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS loa_periods (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                start_at TEXT NOT NULL,
+                end_at TEXT
+            )
+        """)
+
 
 # ==============================
 # TIME FUNCTIONS
@@ -103,6 +112,61 @@ def fmt_duration(sec):
     h, m = divmod(mins, 60)
 
     return f"{h}h {m:02d}m"
+
+
+def start_loa_period(user_id: int, started_at: datetime) -> None:
+    """Record an LOA start unless this user already has an open LOA period."""
+    with db() as c:
+        open_period = c.execute(
+            "SELECT id FROM loa_periods WHERE user_id=? AND end_at IS NULL LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if not open_period:
+            c.execute(
+                "INSERT INTO loa_periods(user_id, start_at, end_at) VALUES (?, ?, NULL)",
+                (user_id, started_at.astimezone(TZ).isoformat()),
+            )
+
+
+def end_loa_period(user_id: int, ended_at: datetime) -> None:
+    """Close the most recent open LOA period for this user."""
+    with db() as c:
+        open_period = c.execute(
+            "SELECT id FROM loa_periods WHERE user_id=? AND end_at IS NULL ORDER BY start_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if open_period:
+            c.execute(
+                "UPDATE loa_periods SET end_at=? WHERE id=?",
+                (ended_at.astimezone(TZ).isoformat(), open_period["id"]),
+            )
+
+
+def loa_days_in_period(user_id: int, period_start: datetime, period_end: datetime) -> int:
+    """Count local calendar days with any overlap with an LOA period."""
+    with db() as c:
+        periods = c.execute(
+            "SELECT start_at, end_at FROM loa_periods WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+
+    loa_dates = set()
+    for row in periods:
+        start = datetime.fromisoformat(row["start_at"]).astimezone(TZ)
+        end = datetime.fromisoformat(row["end_at"]).astimezone(TZ) if row["end_at"] else period_end
+        overlap_start = max(start, period_start)
+        overlap_end = min(end, period_end)
+        if overlap_end <= overlap_start:
+            continue
+        day = overlap_start.date()
+        last_day = overlap_end.date()
+        while day <= last_day:
+            day_start = datetime.combine(day, time.min, TZ)
+            day_end = day_start + timedelta(days=1)
+            if min(overlap_end, day_end) > max(overlap_start, day_start):
+                loa_dates.add(day)
+            day += timedelta(days=1)
+    return len(loa_dates)
 
 
 def peak_seconds(start, end):
@@ -174,6 +238,16 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     if before_has_loa == after_has_loa:
         return
 
+    now = datetime.now(TZ)
+
+    # Persist LOA dates so weekly attendance targets can be adjusted.
+    # Do this before checking the announcement channel so tracking still works
+    # if the LOA announcement channel is unavailable.
+    if not before_has_loa and after_has_loa:
+        start_loa_period(after.id, now)
+    elif before_has_loa and not after_has_loa:
+        end_loa_period(after.id, now)
+
     channel = after.guild.get_channel(LOA_CHANNEL_ID)
 
     if not channel:
@@ -181,8 +255,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             f"LOA channel {LOA_CHANNEL_ID} could not be found."
         )
         return
-
-    now = datetime.now(TZ)
 
     # ==========================================
     # LOA ROLE ADDED
@@ -786,21 +858,18 @@ async def daily_roster_report():
         print(f"Daily roster webhook error: {e}")
 
 
-@tasks.loop(time=time(23, 59, tzinfo=TZ))
+@tasks.loop(time=time(14, 0, tzinfo=TZ), count=1)
 async def weekly_roster_report():
-    """Post weekly staff totals every Sunday at 23:59 local time."""
+    """One-time weekly roster test at 14:00 SAST; restore Sunday 23:59 after testing."""
     now = datetime.now(TZ)
-    # Python weekday: Monday=0, Sunday=6.
-    if now.weekday() != 6:
-        return
 
     if not DAILY_ROSTER_WEBHOOK_URL:
         print("Weekly roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
         return
 
-    # The reporting week starts Monday 00:00 and ends at the Sunday 23:59 run.
+    # Test report covers this week's recorded hours from Monday 00:00 up to test time.
+    monday = now.date() - timedelta(days=now.weekday())
     sunday = now.date()
-    monday = sunday - timedelta(days=6)
     week_start = datetime.combine(monday, time.min, TZ)
     week_end = now
 
@@ -812,6 +881,10 @@ async def weekly_roster_report():
     with db() as c:
         ids = set(row[0] for row in c.execute("SELECT DISTINCT user_id FROM shifts").fetchall())
         ids.update(row[0] for row in c.execute("SELECT user_id FROM active").fetchall())
+        ids.update(row[0] for row in c.execute(
+            "SELECT DISTINCT user_id FROM loa_periods WHERE start_at < ? AND (end_at IS NULL OR end_at > ?)",
+            (week_end.isoformat(), week_start.isoformat()),
+        ).fetchall())
 
     lines = []
     for user_id in ids:
@@ -836,26 +909,78 @@ async def weekly_roster_report():
 
         total_seconds_week = 0
         peak_seconds_week = 0
+        # Track which kinds of time each person actually worked on each day.
+        peak_by_day = {}
+        non_peak_by_day = {}
         for start, end in intervals:
             overlap_start = max(start, week_start)
             overlap_end = min(end, week_end)
             if overlap_end <= overlap_start:
                 continue
-            total_seconds_week += int((overlap_end - overlap_start).total_seconds())
 
+            total_seconds_week += int((overlap_end - overlap_start).total_seconds())
             current_day = overlap_start.date()
             while current_day <= overlap_end.date():
-                peak_start = datetime.combine(current_day, time(18, 0), TZ)
-                peak_end = datetime.combine(current_day, time(23, 0), TZ)
-                peak_overlap_start = max(overlap_start, peak_start)
-                peak_overlap_end = min(overlap_end, peak_end)
-                if peak_overlap_end > peak_overlap_start:
-                    peak_seconds_week += int((peak_overlap_end - peak_overlap_start).total_seconds())
+                day_start = datetime.combine(current_day, time.min, TZ)
+                day_end = min(datetime.combine(current_day + timedelta(days=1), time.min, TZ), week_end)
+                day_overlap_start = max(overlap_start, day_start)
+                day_overlap_end = min(overlap_end, day_end)
+                if day_overlap_end > day_overlap_start:
+                    day_seconds = int((day_overlap_end - day_overlap_start).total_seconds())
+                    peak_start = datetime.combine(current_day, time(18, 0), TZ)
+                    peak_end = datetime.combine(current_day, time(23, 0), TZ)
+                    peak_overlap_start = max(day_overlap_start, peak_start)
+                    peak_overlap_end = min(day_overlap_end, peak_end)
+                    peak_today = int((peak_overlap_end - peak_overlap_start).total_seconds()) if peak_overlap_end > peak_overlap_start else 0
+                    non_peak_today = max(0, day_seconds - peak_today)
+                    peak_by_day[current_day] = peak_by_day.get(current_day, 0) + peak_today
+                    non_peak_by_day[current_day] = non_peak_by_day.get(current_day, 0) + non_peak_today
+                    peak_seconds_week += peak_today
                 current_day += timedelta(days=1)
 
-        if total_seconds_week <= 0:
-            continue
         non_peak_seconds_week = max(0, total_seconds_week - peak_seconds_week)
+        worked_peak_days = {day for day, seconds in peak_by_day.items() if seconds > 0}
+        worked_non_peak_days = {day for day, seconds in non_peak_by_day.items() if seconds > 0}
+        mixed_days = worked_peak_days & worked_non_peak_days
+
+        if peak_seconds_week > 0 and non_peak_seconds_week <= 0:
+            shift_type = "Shift A"
+            weekly_target_seconds = 5 * 60 * 60
+            target_basis_seconds = peak_seconds_week
+            target_basis_label = "Peak"
+        elif non_peak_seconds_week > 0 and peak_seconds_week <= 0:
+            shift_type = "Shift B"
+            weekly_target_seconds = 8 * 60 * 60
+            target_basis_seconds = non_peak_seconds_week
+            target_basis_label = "Total hours"
+        elif mixed_days:
+            shift_type = "Shift D"
+            weekly_target_seconds = 8 * 60 * 60
+            target_basis_seconds = total_seconds_week
+            target_basis_label = "Total hours"
+        elif worked_peak_days and worked_non_peak_days:
+            shift_type = "Shift C"
+            weekly_target_seconds = 8 * 60 * 60
+            target_basis_seconds = total_seconds_week
+            target_basis_label = "Total hours"
+        else:
+            # No recorded work: don't assume a shift type. Keep the standard
+            # mixed-shift target for LOA-only staff until they have a shift pattern.
+            shift_type = "Not classified"
+            weekly_target_seconds = 8 * 60 * 60
+            target_basis_seconds = total_seconds_week
+            target_basis_label = "Total hours"
+
+        loa_days = loa_days_in_period(user_id, week_start, week_end)
+        daily_target_seconds = int(weekly_target_seconds / 7)
+        adjusted_target_seconds = max(0, weekly_target_seconds - loa_days * daily_target_seconds)
+        target_shortfall = max(0, adjusted_target_seconds - target_basis_seconds)
+        target_status = (
+            "Target met" if target_basis_seconds >= adjusted_target_seconds
+            else f"Short by {fmt_duration(target_shortfall)}"
+        )
+        if total_seconds_week <= 0 and loa_days <= 0:
+            continue
 
         member = guild.get_member(user_id)
         if member is None:
@@ -864,23 +989,27 @@ async def weekly_roster_report():
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 member = None
         name = member.display_name if member else f"Discord user {user_id}"
+        display_shift_type = shift_type.replace("Shift ", "")
         message = (
             f"**{discord.utils.escape_markdown(name)}**\n"
+            f"Shift Type: {display_shift_type}\n"
+            f"LOA Days: {loa_days}\n"
+            f"Required Hours: {fmt_duration(adjusted_target_seconds)}\n"
+            f"Total Hours: {fmt_duration(total_seconds_week)}\n"
             f"Peak: {fmt_duration(peak_seconds_week)}\n"
-            f"Non Peak: {fmt_duration(non_peak_seconds_week)}\n"
-            f"Total Shift: {fmt_duration(total_seconds_week)}"
+            f"Non Peak: {fmt_duration(non_peak_seconds_week)}"
         )
         lines.append((name.casefold(), message))
 
     lines.sort(key=lambda item: item[0])
-    heading = f"**Weekly Staff Roster (Monday - {monday:%d/%m/%Y} to Sunday - {sunday:%d/%m/%Y}): 00:00 - 23:59**"
+    heading = f"**WEEKLY ROSTER TEST (Monday - {monday:%d/%m/%Y} to {now:%A - %d/%m/%Y}, as of {now:%H:%M})**"
     roster = "\n\n".join(line for _, line in lines)
     content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded this week."
 
     try:
         webhook = discord.Webhook.from_url(DAILY_ROSTER_WEBHOOK_URL, client=bot)
         await webhook.send(content=content, username="Used-A-Ton Weekly Roster", allowed_mentions=discord.AllowedMentions.none())
-        print(f"Weekly roster posted for {monday:%Y-%m-%d} to {sunday:%Y-%m-%d}.")
+        print(f"Weekly roster TEST posted for {monday:%Y-%m-%d} to {now:%Y-%m-%d} at {now:%H:%M}.")
     except Exception as e:
         print(f"Weekly roster webhook error: {e}")
 
@@ -948,6 +1077,14 @@ async def on_ready():
 
     if not weekly_roster_report.is_running():
         weekly_roster_report.start()
+
+    # Start tracking any existing LOA roles from this startup onward.
+    # Their original start dates cannot be inferred from Discord's current role state.
+    now = datetime.now(TZ)
+    for guild in bot.guilds:
+        for member in guild.members:
+            if any(role.id == LOA_ROLE_ID for role in member.roles):
+                start_loa_period(member.id, now)
 
 
 # ============================================================
