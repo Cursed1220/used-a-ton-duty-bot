@@ -46,6 +46,15 @@ TZ = ZoneInfo(os.getenv("TIMEZONE", "Africa/Johannesburg"))
 DB = "duty.db"
 
 
+# ============================================================
+# REFUND MESSAGE MOVER (separate from clocking/LOA features)
+# ============================================================
+
+REFUNDS_CHANNEL_ID = 1552971429761523722
+REFUNDS_COMPLETED_CHANNEL_ID = 1561808012505518150
+REFUND_MOVE_EMOJI = "✅"
+
+
 # ==============================
 # DISCORD SETUP
 # ==============================
@@ -54,6 +63,7 @@ intents = discord.Intents.default()
 
 intents.members = True
 intents.message_content = True
+intents.reactions = True
 
 bot = commands.Bot(
     command_prefix="!",
@@ -234,6 +244,80 @@ def manager(interaction):
             )
         )
     )
+
+
+# ============================================================
+# REFUND MESSAGE MOVER
+# Only handles ✅ reactions in #refunds.
+# This section does not interact with clocking, shifts, or LOA.
+# ============================================================
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    # Only handle the configured source channel and the tick reaction.
+    if payload.channel_id != REFUNDS_CHANNEL_ID:
+        return
+
+    if str(payload.emoji) != REFUND_MOVE_EMOJI:
+        return
+
+    # Ignore the bot's own reactions.
+    if bot.user and payload.user_id == bot.user.id:
+        return
+
+    source_channel = bot.get_channel(REFUNDS_CHANNEL_ID)
+    destination_channel = bot.get_channel(REFUNDS_COMPLETED_CHANNEL_ID)
+
+    if source_channel is None or destination_channel is None:
+        print(
+            "Refund mover error: source or destination channel could not be found. "
+            f"Source={REFUNDS_CHANNEL_ID}, destination={REFUNDS_COMPLETED_CHANNEL_ID}"
+        )
+        return
+
+    try:
+        original = await source_channel.fetch_message(payload.message_id)
+    except discord.NotFound:
+        # Another reaction may already have moved and deleted this message.
+        return
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Refund mover error: could not fetch original message: {e}")
+        return
+
+    # Only move webhook-created messages from the price-list website.
+    if original.webhook_id is None:
+        return
+
+    try:
+        # Recreate the website's message, preserving its text and embed formatting.
+        copied_embeds = [
+            discord.Embed.from_dict(embed.to_dict())
+            for embed in original.embeds
+        ]
+
+        await destination_channel.send(
+            content=original.content or None,
+            embeds=copied_embeds or None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+        # Delete only after the destination post succeeds.
+        await original.delete()
+        print(
+            f"Refund mover: moved message {original.id} from "
+            f"#{REFUNDS_CHANNEL_ID} to #{REFUNDS_COMPLETED_CHANNEL_ID}."
+        )
+
+    except discord.Forbidden:
+        print(
+            "Refund mover permission error: the bot needs View Channel, "
+            "Read Message History, Send Messages, Embed Links, and Manage Messages "
+            "permissions in the relevant channels."
+        )
+    except discord.HTTPException as e:
+        print(f"Refund mover Discord API error: {e}")
+    except Exception as e:
+        print(f"Refund mover unexpected error: {e}")
 
 
 # ============================================================
