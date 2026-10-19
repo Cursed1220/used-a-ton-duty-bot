@@ -858,18 +858,21 @@ async def daily_roster_report():
         print(f"Daily roster webhook error: {e}")
 
 
-@tasks.loop(time=time(14, 0, tzinfo=TZ), count=1)
+@tasks.loop(time=time(23, 59, tzinfo=TZ))
 async def weekly_roster_report():
-    """One-time weekly roster test at 14:00 SAST; restore Sunday 23:59 after testing."""
+    """Post weekly staff totals every Sunday at 23:59 local time."""
     now = datetime.now(TZ)
+    # Python weekday: Monday=0, Sunday=6.
+    if now.weekday() != 6:
+        return
 
     if not DAILY_ROSTER_WEBHOOK_URL:
         print("Weekly roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
         return
 
-    # Test report covers this week's recorded hours from Monday 00:00 up to test time.
-    monday = now.date() - timedelta(days=now.weekday())
+    # The reporting week starts Monday 00:00 and ends at the Sunday 23:59 run.
     sunday = now.date()
+    monday = sunday - timedelta(days=6)
     week_start = datetime.combine(monday, time.min, TZ)
     week_end = now
 
@@ -1002,14 +1005,14 @@ async def weekly_roster_report():
         lines.append((name.casefold(), message))
 
     lines.sort(key=lambda item: item[0])
-    heading = f"**WEEKLY ROSTER TEST (Monday - {monday:%d/%m/%Y} to {now:%A - %d/%m/%Y}, as of {now:%H:%M})**"
+    heading = f"**Weekly Staff Roster (Monday - {monday:%d/%m/%Y} to Sunday - {sunday:%d/%m/%Y}): 00:00 - 23:59**"
     roster = "\n\n".join(line for _, line in lines)
     content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded this week."
 
     try:
         webhook = discord.Webhook.from_url(DAILY_ROSTER_WEBHOOK_URL, client=bot)
         await webhook.send(content=content, username="Used-A-Ton Weekly Roster", allowed_mentions=discord.AllowedMentions.none())
-        print(f"Weekly roster TEST posted for {monday:%Y-%m-%d} to {now:%Y-%m-%d} at {now:%H:%M}.")
+        print(f"Weekly roster posted for {monday:%Y-%m-%d} to {sunday:%Y-%m-%d}.")
     except Exception as e:
         print(f"Weekly roster webhook error: {e}")
 
