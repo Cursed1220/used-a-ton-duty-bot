@@ -98,9 +98,15 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 start_at TEXT NOT NULL,
-                end_at TEXT
+                end_at TEXT,
+                announcement_message_id INTEGER
             )
         """)
+
+        # Safe migration for existing duty.db files created before LOA message tracking.
+        loa_columns = {row[1] for row in c.execute("PRAGMA table_info(loa_periods)").fetchall()}
+        if "announcement_message_id" not in loa_columns:
+            c.execute("ALTER TABLE loa_periods ADD COLUMN announcement_message_id INTEGER")
 
 
 # ==============================
@@ -114,25 +120,36 @@ def fmt_duration(sec):
     return f"{h}h {m:02d}m"
 
 
-def start_loa_period(user_id: int, started_at: datetime) -> None:
-    """Record an LOA start unless this user already has an open LOA period."""
+def start_loa_period(user_id: int, started_at: datetime):
+    """Record an LOA start and return its database row id."""
     with db() as c:
         open_period = c.execute(
             "SELECT id FROM loa_periods WHERE user_id=? AND end_at IS NULL LIMIT 1",
             (user_id,),
         ).fetchone()
-        if not open_period:
-            c.execute(
-                "INSERT INTO loa_periods(user_id, start_at, end_at) VALUES (?, ?, NULL)",
-                (user_id, started_at.astimezone(TZ).isoformat()),
-            )
+        if open_period:
+            return open_period["id"]
+        cursor = c.execute(
+            "INSERT INTO loa_periods(user_id, start_at, end_at, announcement_message_id) VALUES (?, ?, NULL, NULL)",
+            (user_id, started_at.astimezone(TZ).isoformat()),
+        )
+        return cursor.lastrowid
 
 
-def end_loa_period(user_id: int, ended_at: datetime) -> None:
-    """Close the most recent open LOA period for this user."""
+def set_loa_announcement_message(period_id: int, message_id: int) -> None:
+    """Save the Discord message id so the bot can edit it on return."""
+    with db() as c:
+        c.execute(
+            "UPDATE loa_periods SET announcement_message_id=? WHERE id=?",
+            (message_id, period_id),
+        )
+
+
+def end_loa_period(user_id: int, ended_at: datetime):
+    """Close the open LOA period and return its saved details."""
     with db() as c:
         open_period = c.execute(
-            "SELECT id FROM loa_periods WHERE user_id=? AND end_at IS NULL ORDER BY start_at DESC LIMIT 1",
+            "SELECT id, start_at, announcement_message_id FROM loa_periods WHERE user_id=? AND end_at IS NULL ORDER BY start_at DESC LIMIT 1",
             (user_id,),
         ).fetchone()
         if open_period:
@@ -140,6 +157,8 @@ def end_loa_period(user_id: int, ended_at: datetime) -> None:
                 "UPDATE loa_periods SET end_at=? WHERE id=?",
                 (ended_at.astimezone(TZ).isoformat(), open_period["id"]),
             )
+            return dict(open_period)
+    return None
 
 
 def loa_days_in_period(user_id: int, period_start: datetime, period_end: datetime) -> int:
@@ -223,120 +242,99 @@ def manager(interaction):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
+    before_has_loa = any(role.id == LOA_ROLE_ID for role in before.roles)
+    after_has_loa = any(role.id == LOA_ROLE_ID for role in after.roles)
 
-    before_has_loa = any(
-        role.id == LOA_ROLE_ID
-        for role in before.roles
-    )
-
-    after_has_loa = any(
-        role.id == LOA_ROLE_ID
-        for role in after.roles
-    )
-
-    # Nothing changed regarding LOA
+    # Ignore member updates unrelated to the LOA role.
     if before_has_loa == after_has_loa:
         return
 
     now = datetime.now(TZ)
-
-    # Persist LOA dates so weekly attendance targets can be adjusted.
-    # Do this before checking the announcement channel so tracking still works
-    # if the LOA announcement channel is unavailable.
-    if not before_has_loa and after_has_loa:
-        start_loa_period(after.id, now)
-    elif before_has_loa and not after_has_loa:
-        end_loa_period(after.id, now)
-
     channel = after.guild.get_channel(LOA_CHANNEL_ID)
-
-    if not channel:
-        print(
-            f"LOA channel {LOA_CHANNEL_ID} could not be found."
-        )
+    if channel is None:
+        print(f"LOA channel {LOA_CHANNEL_ID} could not be found.")
+        # Keep the attendance/LOA records accurate even if the channel is unavailable.
+        if not before_has_loa and after_has_loa:
+            start_loa_period(after.id, now)
+        elif before_has_loa and not after_has_loa:
+            end_loa_period(after.id, now)
         return
 
-    # ==========================================
-    # LOA ROLE ADDED
-    # ==========================================
-
     if not before_has_loa and after_has_loa:
-
+        period_id = start_loa_period(after.id, now)
         embed = discord.Embed(
-            title="🟠 STAFF MEMBER ON LOA",
+            title="⛔ STAFF MEMBER ON LOA",
             description=(
-                f"**{after.display_name}** has gone on "
-                f"**Leave of Absence**.\n\n"
+                f"**{after.display_name}** has gone on **Leave of Absence**.\n\n"
                 f"🔴 **Status:** On Leave\n"
-                f"🕐 **Time:** {now:%H:%M}\n"
-                f"📅 **Date:** {now:%d %B %Y}"
+                f"📅 **Start Date:** {now:%d/%m/%Y}\n"
+                f"🕐 **Start Time:** {now:%H:%M} SAST"
             ),
             color=discord.Color.orange(),
-            timestamp=now
+            timestamp=now,
         )
-
-        embed.set_footer(
-            text="Used-A-Ton Management"
-        )
-
+        embed.set_footer(text="Used-A-Ton Management • This message will be updated when the employee returns")
         try:
-            await channel.send(embed=embed)
-
-            print(
-                f"LOA: {after.display_name} went on LOA."
-            )
-
+            message = await channel.send(embed=embed)
+            set_loa_announcement_message(period_id, message.id)
+            print(f"LOA: {after.display_name} went on LOA; announcement saved.")
         except discord.Forbidden:
-            print(
-                "ERROR: I don't have permission to send "
-                "messages in the LOA channel."
-            )
-
+            print("ERROR: I don't have permission to send messages in the LOA channel.")
         except Exception as e:
-            print(
-                f"LOA announcement error: {e}"
-            )
-
-    # ==========================================
-    # LOA ROLE REMOVED
-    # ==========================================
+            print(f"LOA announcement error: {e}")
 
     elif before_has_loa and not after_has_loa:
+        period = end_loa_period(after.id, now)
+        if period:
+            started_at = datetime.fromisoformat(period["start_at"]).astimezone(TZ)
+        else:
+            started_at = now
+        elapsed_seconds = max(0, int((now - started_at).total_seconds()))
+        total_days = (now.date() - started_at.date()).days + 1
+        days, rem = divmod(elapsed_seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
+        duration_parts = []
+        if days:
+            duration_parts.append(f"{days} day{'s' if days != 1 else ''}")
+        if hours:
+            duration_parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+        if minutes or not duration_parts:
+            duration_parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+        duration_text = ", ".join(duration_parts)
 
         embed = discord.Embed(
-            title="🟢 STAFF MEMBER BACK AT WORK",
+            title="✅ STAFF MEMBER BACK AT WORK",
             description=(
-                f"**{after.display_name}** has returned "
-                f"from **Leave of Absence**.\n\n"
+                f"**{after.display_name}** has returned from **Leave of Absence**.\n\n"
                 f"🟢 **Status:** Back at Work\n"
-                f"🕐 **Time:** {now:%H:%M}\n"
-                f"📅 **Date:** {now:%d %B %Y}"
+                f"📅 **Start Date:** {started_at:%d/%m/%Y}\n"
+                f"🕐 **Start Time:** {started_at:%H:%M} SAST\n"
+                f"📅 **End Date:** {now:%d/%m/%Y}\n"
+                f"🕐 **End Time:** {now:%H:%M} SAST\n"
+                f"⏱️ **Total Duration:** {duration_text}\n"
+                f"📆 **Total Calendar Days:** {total_days}"
             ),
             color=discord.Color.green(),
-            timestamp=now
+            timestamp=now,
         )
-
-        embed.set_footer(
-            text="Used-A-Ton Management"
-        )
-
+        embed.set_footer(text="Used-A-Ton Management • Completed LOA record")
         try:
+            message_id = period.get("announcement_message_id") if period else None
+            if message_id:
+                try:
+                    original_message = await channel.fetch_message(message_id)
+                    await original_message.edit(embed=embed, content=None)
+                    print(f"LOA: Updated original announcement for {after.display_name}.")
+                    return
+                except discord.NotFound:
+                    print(f"Original LOA announcement for {after.display_name} was not found; posting completed record.")
             await channel.send(embed=embed)
-
-            print(
-                f"LOA: {after.display_name} returned to work."
-            )
-
+            print(f"LOA: {after.display_name} returned to work; completed record posted.")
         except discord.Forbidden:
-            print(
-                "ERROR: I don't have permission to send "
-                "messages in the LOA channel."
-            )
-
+            print("ERROR: I don't have permission to edit or send messages in the LOA channel.")
         except Exception as e:
-            print(
-                f"LOA announcement error: {e}"
-            )
+            print(f"LOA announcement error: {e}")
 
 
 # ============================================================
