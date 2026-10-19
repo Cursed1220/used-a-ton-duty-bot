@@ -254,31 +254,43 @@ def manager(interaction):
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # Only handle the configured source channel and the tick reaction.
+    # Diagnostic log: this tells us whether Discord is delivering reaction events.
+    print(
+        f"Refund mover: reaction event received | channel={payload.channel_id} "
+        f"message={payload.message_id} emoji={str(payload.emoji)!r} "
+        f"user={payload.user_id}"
+    )
+
     if payload.channel_id != REFUNDS_CHANNEL_ID:
         return
 
     if str(payload.emoji) != REFUND_MOVE_EMOJI:
+        print(
+            f"Refund mover: ignored reaction {str(payload.emoji)!r}; "
+            f"expected {REFUND_MOVE_EMOJI!r}."
+        )
         return
 
     # Ignore the bot's own reactions.
     if bot.user and payload.user_id == bot.user.id:
         return
 
-    source_channel = bot.get_channel(REFUNDS_CHANNEL_ID)
-    destination_channel = bot.get_channel(REFUNDS_COMPLETED_CHANNEL_ID)
+    try:
+        source_channel = bot.get_channel(REFUNDS_CHANNEL_ID)
+        if source_channel is None:
+            source_channel = await bot.fetch_channel(REFUNDS_CHANNEL_ID)
 
-    if source_channel is None or destination_channel is None:
-        print(
-            "Refund mover error: source or destination channel could not be found. "
-            f"Source={REFUNDS_CHANNEL_ID}, destination={REFUNDS_COMPLETED_CHANNEL_ID}"
-        )
+        destination_channel = bot.get_channel(REFUNDS_COMPLETED_CHANNEL_ID)
+        if destination_channel is None:
+            destination_channel = await bot.fetch_channel(REFUNDS_COMPLETED_CHANNEL_ID)
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as e:
+        print(f"Refund mover error: could not access a configured channel: {e}")
         return
 
     try:
         original = await source_channel.fetch_message(payload.message_id)
     except discord.NotFound:
-        # Another reaction may already have moved and deleted this message.
+        print(f"Refund mover: message {payload.message_id} no longer exists.")
         return
     except (discord.Forbidden, discord.HTTPException) as e:
         print(f"Refund mover error: could not fetch original message: {e}")
@@ -286,14 +298,23 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     # Only move webhook-created messages from the price-list website.
     if original.webhook_id is None:
+        print(
+            f"Refund mover: ignored message {original.id}; it was not sent by a webhook."
+        )
         return
 
     try:
-        # Recreate the website's message, preserving its text and embed formatting.
         copied_embeds = [
             discord.Embed.from_dict(embed.to_dict())
             for embed in original.embeds
         ]
+
+        # A webhook transaction should contain an embed; preserve content too if present.
+        if not original.content and not copied_embeds:
+            print(
+                f"Refund mover error: message {original.id} has no text or embeds to copy."
+            )
+            return
 
         await destination_channel.send(
             content=original.content or None,
@@ -304,20 +325,20 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         # Delete only after the destination post succeeds.
         await original.delete()
         print(
-            f"Refund mover: moved message {original.id} from "
-            f"#{REFUNDS_CHANNEL_ID} to #{REFUNDS_COMPLETED_CHANNEL_ID}."
+            f"Refund mover: SUCCESS — moved message {original.id} from "
+            f"channel {REFUNDS_CHANNEL_ID} to {REFUNDS_COMPLETED_CHANNEL_ID}."
         )
 
     except discord.Forbidden:
         print(
-            "Refund mover permission error: the bot needs View Channel, "
-            "Read Message History, Send Messages, Embed Links, and Manage Messages "
-            "permissions in the relevant channels."
+            "Refund mover permission error: grant the bot View Channel and Read Message "
+            "History in #refunds; Send Messages and Embed Links in #refunds-completed; "
+            "and Manage Messages in #refunds."
         )
     except discord.HTTPException as e:
         print(f"Refund mover Discord API error: {e}")
     except Exception as e:
-        print(f"Refund mover unexpected error: {e}")
+        print(f"Refund mover unexpected error: {type(e).__name__}: {e}")
 
 
 # ============================================================
