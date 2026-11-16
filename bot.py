@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import shutil
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
@@ -43,7 +44,28 @@ LOA_CHANNEL_ID = 1553340731089752074
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Africa/Johannesburg"))
 
-DB = "duty.db"
+# Home Assistant add-ons must keep SQLite data in /data across restarts/rebuilds.
+if os.getenv("DATABASE_PATH"):
+    DB = os.getenv("DATABASE_PATH")
+elif os.path.isdir("/data"):
+    DB = "/data/duty.db"
+else:
+    DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "duty.db")
+
+# One-time migration from the old relative database path, if it exists.
+_legacy_candidates = {
+    os.path.abspath("duty.db"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "duty.db"),
+}
+if DB == "/data/duty.db" and not os.path.exists(DB):
+    for _legacy_db in _legacy_candidates:
+        if _legacy_db != DB and os.path.isfile(_legacy_db):
+            try:
+                shutil.copy2(_legacy_db, DB)
+                print(f"Migrated existing duty database from {_legacy_db} to {DB}.")
+                break
+            except OSError as e:
+                print(f"WARNING: Could not migrate legacy duty database {_legacy_db}: {e}")
 
 
 # ============================================================
@@ -82,6 +104,7 @@ def db():
 
 
 def init_db():
+    print(f"Using duty database: {os.path.abspath(DB)}")
     with db() as c:
 
         c.execute("""
@@ -493,6 +516,7 @@ class DutyView(discord.ui.View):
                     now.isoformat()
                 )
             )
+            print(f"CLOCK IN saved | user={interaction.user.id} | at={now.isoformat()} | db={os.path.abspath(DB)}")
 
         role = interaction.guild.get_role(
             ON_DUTY_ROLE_ID
@@ -590,6 +614,11 @@ class DutyView(discord.ui.View):
                     peak,
                     off
                 )
+            )
+            print(
+                f"CLOCK OUT saved | user={interaction.user.id} | "
+                f"start={start.isoformat()} | end={now.isoformat()} | "
+                f"total={seconds}s | peak={peak}s | db={os.path.abspath(DB)}"
             )
 
         role = interaction.guild.get_role(
@@ -903,7 +932,7 @@ def daily_shift_breakdown(user_id: int, day_start: datetime, day_end: datetime) 
     return peak_total, non_peak_total, total_seconds
 
 
-@tasks.loop(time=time(23, 59, tzinfo=TZ))
+@tasks.loop(time=time(23, 55, tzinfo=TZ))
 async def daily_roster_report():
     if not DAILY_ROSTER_WEBHOOK_URL:
         print("Daily roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
@@ -911,7 +940,8 @@ async def daily_roster_report():
 
     now = datetime.now(TZ)
     day_start = datetime.combine(now.date(), time.min, TZ)
-    day_end = day_start + timedelta(days=1)
+    # Daily report runs at 23:55; include active shifts up to the report time.
+    day_end = now
 
     # Use the configured guild, or the first available guild if no ID is set.
     guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
@@ -949,7 +979,7 @@ async def daily_roster_report():
         ))
 
     lines.sort(key=lambda item: item[0])
-    heading = f"**({now:%A - %d/%m/%Y}): 00:00 - 23:59**"
+    heading = f"**({now:%A - %d/%m/%Y}): 00:00 - 23:55**"
     roster = "\n\n".join(line for _, line in lines)
     content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded today."
 
@@ -961,9 +991,9 @@ async def daily_roster_report():
         print(f"Daily roster webhook error: {e}")
 
 
-@tasks.loop(time=time(23, 59, tzinfo=TZ))
+@tasks.loop(time=time(23, 59, 59, tzinfo=TZ))
 async def weekly_roster_report():
-    """Post weekly staff totals every Sunday at 23:59 local time."""
+    """Post weekly staff totals every Sunday at 23:59:59 local time."""
     now = datetime.now(TZ)
     # Python weekday: Monday=0, Sunday=6.
     if now.weekday() != 6:
@@ -973,11 +1003,11 @@ async def weekly_roster_report():
         print("Weekly roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
         return
 
-    # The reporting week starts Monday 00:00 and ends at the Sunday 23:59 run.
+    # Reporting week: Monday 00:01 through Sunday 23:59:59.
     sunday = now.date()
     monday = sunday - timedelta(days=6)
-    week_start = datetime.combine(monday, time.min, TZ)
-    week_end = now
+    week_start = datetime.combine(monday, time(0, 1), TZ)
+    week_end = datetime.combine(sunday, time(23, 59, 59, 999999), TZ)
 
     guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
     if guild is None:
@@ -1053,29 +1083,30 @@ async def weekly_roster_report():
             shift_type = "Shift A"
             weekly_target_seconds = 5 * 60 * 60
             target_basis_seconds = peak_seconds_week
-            target_basis_label = "Peak"
         elif non_peak_seconds_week > 0 and peak_seconds_week <= 0:
             shift_type = "Shift B"
-            weekly_target_seconds = 8 * 60 * 60
+            weekly_target_seconds = 7 * 60 * 60
             target_basis_seconds = non_peak_seconds_week
-            target_basis_label = "Total hours"
         elif mixed_days:
-            shift_type = "Shift D"
-            weekly_target_seconds = 8 * 60 * 60
-            target_basis_seconds = total_seconds_week
-            target_basis_label = "Total hours"
+            # Shift D normally requires 6 total hours. If 5 peak hours are
+            # reached, reclassify the member as Shift A.
+            if peak_seconds_week >= 5 * 60 * 60:
+                shift_type = "Shift A"
+                weekly_target_seconds = 5 * 60 * 60
+                target_basis_seconds = peak_seconds_week
+            else:
+                shift_type = "Shift D"
+                weekly_target_seconds = 6 * 60 * 60
+                target_basis_seconds = total_seconds_week
         elif worked_peak_days and worked_non_peak_days:
             shift_type = "Shift C"
-            weekly_target_seconds = 8 * 60 * 60
+            weekly_target_seconds = 7 * 60 * 60
             target_basis_seconds = total_seconds_week
-            target_basis_label = "Total hours"
         else:
-            # No recorded work: don't assume a shift type. Keep the standard
-            # mixed-shift target for LOA-only staff until they have a shift pattern.
+            # LOA-only staff retain the mixed-shift target until classified.
             shift_type = "Not classified"
-            weekly_target_seconds = 8 * 60 * 60
+            weekly_target_seconds = 7 * 60 * 60
             target_basis_seconds = total_seconds_week
-            target_basis_label = "Total hours"
 
         loa_days = loa_days_in_period(user_id, week_start, week_end)
         daily_target_seconds = int(weekly_target_seconds / 7)
@@ -1096,6 +1127,10 @@ async def weekly_roster_report():
                 member = None
         name = member.display_name if member else f"Discord user {user_id}"
         display_shift_type = shift_type.replace("Shift ", "")
+        exceeding_seconds = (
+            max(0, total_seconds_week - adjusted_target_seconds)
+            if shift_type == "Shift A" else 0
+        )
         message = (
             f"**{discord.utils.escape_markdown(name)}**\n"
             f"Shift Type: {display_shift_type}\n"
@@ -1103,12 +1138,14 @@ async def weekly_roster_report():
             f"Required Hours: {fmt_duration(adjusted_target_seconds)}\n"
             f"Total Hours: {fmt_duration(total_seconds_week)}\n"
             f"Peak: {fmt_duration(peak_seconds_week)}\n"
-            f"Non Peak: {fmt_duration(non_peak_seconds_week)}"
+            f"Non Peak: {fmt_duration(non_peak_seconds_week)}\n"
+            f"Exceeding Hours: {fmt_duration(exceeding_seconds)}\n"
+            f"Status: {target_status}"
         )
         lines.append((name.casefold(), message))
 
     lines.sort(key=lambda item: item[0])
-    heading = f"**Weekly Staff Roster (Monday - {monday:%d/%m/%Y} to Sunday - {sunday:%d/%m/%Y}): 00:00 - 23:59**"
+    heading = f"**Weekly Staff Roster (Monday - {monday:%d/%m/%Y} to Sunday - {sunday:%d/%m/%Y}): Monday 00:01 - Sunday 23:59**"
     roster = "\n\n".join(line for _, line in lines)
     content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded this week."
 
