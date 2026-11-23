@@ -43,6 +43,13 @@ LOA_ROLE_ID = 1553335212723802122
 LOA_CHANNEL_ID = 1553340731089752074
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Africa/Johannesburg"))
+PEAK_START = time(19, 0)
+PEAK_END = time(0, 0)
+DAILY_REPORT_TIMES = [
+    time(23, 55, tzinfo=TZ),  # Sunday daily report
+    time(23, 59, tzinfo=TZ),  # Monday-Saturday daily reports
+]
+WEEKLY_REPORT_TIME = time(23, 59, tzinfo=TZ)
 
 # Home Assistant add-ons must keep SQLite data in /data across restarts/rebuilds.
 if os.getenv("DATABASE_PATH"):
@@ -230,13 +237,13 @@ def peak_seconds(start, end):
 
         p1 = datetime.combine(
             day,
-            time(18, 0),
+            PEAK_START,
             TZ
         )
 
         p2 = datetime.combine(
-            day,
-            time(23, 0),
+            day + timedelta(days=1),
+            PEAK_END,
             TZ
         )
 
@@ -769,7 +776,7 @@ async def hours(
     await interaction.response.send_message(
         f"**{target.display_name}**\n"
         f"Total: **{fmt_duration(r['s'])}**\n"
-        f"Peak (18:00–23:00): **{fmt_duration(r['p'])}**\n"
+        f"Peak (19:00–00:00): **{fmt_duration(r['p'])}**\n"
         f"Off-peak: **{fmt_duration(r['o'])}**",
         ephemeral=True
     )
@@ -884,7 +891,7 @@ async def force_clockout(
 def daily_shift_breakdown(user_id: int, day_start: datetime, day_end: datetime) -> tuple[int, int, int]:
     """Return peak, non-peak, and total seconds overlapping one local calendar day.
 
-    Peak hours are 18:00–23:00 Africa/Johannesburg time. All other time is non-peak.
+    Peak hours are 19:00–00:00 Africa/Johannesburg time. All other time is non-peak.
     Shifts crossing midnight are split across the relevant calendar days.
     """
     with db() as c:
@@ -920,9 +927,9 @@ def daily_shift_breakdown(user_id: int, day_start: datetime, day_end: datetime) 
 
         total_seconds += int((overlap_end - overlap_start).total_seconds())
 
-        # Intersect the shift with the daily peak window, 18:00 to 23:00.
-        peak_start = datetime.combine(day_start.date(), time(18, 0), TZ)
-        peak_end = datetime.combine(day_start.date(), time(23, 0), TZ)
+        # Intersect the shift with the daily peak window, 19:00 to 00:00.
+        peak_start = datetime.combine(day_start.date(), PEAK_START, TZ)
+        peak_end = datetime.combine(day_start.date() + timedelta(days=1), PEAK_END, TZ)
         peak_overlap_start = max(overlap_start, peak_start)
         peak_overlap_end = min(overlap_end, peak_end)
         if peak_overlap_end > peak_overlap_start:
@@ -932,15 +939,23 @@ def daily_shift_breakdown(user_id: int, day_start: datetime, day_end: datetime) 
     return peak_total, non_peak_total, total_seconds
 
 
-@tasks.loop(time=time(23, 55, tzinfo=TZ))
+@tasks.loop(time=DAILY_REPORT_TIMES)
 async def daily_roster_report():
+    now = datetime.now(TZ)
+    # The daily task wakes at both times, but only posts at the correct
+    # time for that day: Sunday 23:55; Monday-Saturday 23:59.
+    is_sunday = now.weekday() == 6
+    if is_sunday and (now.hour, now.minute) != (23, 55):
+        return
+    if not is_sunday and (now.hour, now.minute) != (23, 59):
+        return
+
     if not DAILY_ROSTER_WEBHOOK_URL:
         print("Daily roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
         return
 
-    now = datetime.now(TZ)
     day_start = datetime.combine(now.date(), time.min, TZ)
-    # Daily report runs at 23:55; include active shifts up to the report time.
+    # Include active shifts up to the scheduled daily report time.
     day_end = now
 
     # Use the configured guild, or the first available guild if no ID is set.
@@ -979,7 +994,8 @@ async def daily_roster_report():
         ))
 
     lines.sort(key=lambda item: item[0])
-    heading = f"**({now:%A - %d/%m/%Y}): 00:00 - 23:55**"
+    report_cutoff = "23:55" if is_sunday else "23:59"
+    heading = f"**({now:%A - %d/%m/%Y}): 00:00 - {report_cutoff}**"
     roster = "\n\n".join(line for _, line in lines)
     content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded today."
 
@@ -991,9 +1007,9 @@ async def daily_roster_report():
         print(f"Daily roster webhook error: {e}")
 
 
-@tasks.loop(time=time(23, 59, 59, tzinfo=TZ))
+@tasks.loop(time=WEEKLY_REPORT_TIME)
 async def weekly_roster_report():
-    """Post weekly staff totals every Sunday at 23:59:59 local time."""
+    """Post weekly staff totals every Sunday at 23:59 local time."""
     now = datetime.now(TZ)
     # Python weekday: Monday=0, Sunday=6.
     if now.weekday() != 6:
@@ -1003,11 +1019,12 @@ async def weekly_roster_report():
         print("Weekly roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
         return
 
-    # Reporting week: Monday 00:01 through Sunday 23:59:59.
+    # Reporting week is [Monday 00:01, following Monday 00:00),
+    # which includes all of Sunday through 23:59:59.999999.
     sunday = now.date()
     monday = sunday - timedelta(days=6)
     week_start = datetime.combine(monday, time(0, 1), TZ)
-    week_end = datetime.combine(sunday, time(23, 59, 59, 999999), TZ)
+    week_end = datetime.combine(sunday + timedelta(days=1), time.min, TZ)
 
     guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
     if guild is None:
@@ -1063,8 +1080,8 @@ async def weekly_roster_report():
                 day_overlap_end = min(overlap_end, day_end)
                 if day_overlap_end > day_overlap_start:
                     day_seconds = int((day_overlap_end - day_overlap_start).total_seconds())
-                    peak_start = datetime.combine(current_day, time(18, 0), TZ)
-                    peak_end = datetime.combine(current_day, time(23, 0), TZ)
+                    peak_start = datetime.combine(current_day, PEAK_START, TZ)
+                    peak_end = datetime.combine(current_day + timedelta(days=1), PEAK_END, TZ)
                     peak_overlap_start = max(day_overlap_start, peak_start)
                     peak_overlap_end = min(day_overlap_end, peak_end)
                     peak_today = int((peak_overlap_end - peak_overlap_start).total_seconds()) if peak_overlap_end > peak_overlap_start else 0
@@ -1220,6 +1237,8 @@ async def on_ready():
 
     if not weekly_roster_report.is_running():
         weekly_roster_report.start()
+
+    print(f"Roster schedules | Daily: every day at 23:55 {TZ} | Weekly: Sundays at 23:59 {TZ}")
 
     # Start tracking any existing LOA roles from this startup onward.
     # Their original start dates cannot be inferred from Discord's current role state.
