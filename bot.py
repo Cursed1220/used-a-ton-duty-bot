@@ -1,1259 +1,978 @@
-import os
-import json
-import sqlite3
-import shutil
-from datetime import datetime, timedelta, time
-from zoneinfo import ZoneInfo
+<!DOCTYPE html>
 
-import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-from dotenv import load_dotenv
-
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
-
-ON_DUTY_ROLE_ID = int(os.getenv("ON_DUTY_ROLE_ID", "0"))
-DUTY_LOG_CHANNEL_ID = int(os.getenv("DUTY_LOG_CHANNEL_ID", "0"))
-CLOCK_CHANNEL_ID = int(os.getenv("CLOCK_CHANNEL_ID", "0"))
-MANAGER_ROLE_ID = int(os.getenv("MANAGER_ROLE_ID", "0"))
-def load_daily_roster_webhook_url():
-    """Read the webhook from Home Assistant add-on options, with env fallback."""
-    options_path = "/data/options.json"
-    try:
-        with open(options_path, "r", encoding="utf-8") as options_file:
-            options = json.load(options_file)
-        value = options.get("daily_roster_webhook_url", "")
-        if value:
-            return str(value).strip()
-    except (OSError, json.JSONDecodeError):
-        pass
-    return os.getenv("DAILY_ROSTER_WEBHOOK_URL", "").strip()
-
-
-DAILY_ROSTER_WEBHOOK_URL = load_daily_roster_webhook_url()
-
-# ==============================
-# LOA SETTINGS
-# ==============================
-
-LOA_ROLE_ID = 1553335212723802122
-LOA_CHANNEL_ID = 1553340731089752074
-
-TZ = ZoneInfo(os.getenv("TIMEZONE", "Africa/Johannesburg"))
-PEAK_START = time(19, 0)
-PEAK_END = time(0, 0)
-DAILY_REPORT_TIMES = [
-    time(23, 55, tzinfo=TZ),  # Sunday daily report
-    time(23, 59, tzinfo=TZ),  # Monday-Saturday daily reports
-]
-WEEKLY_REPORT_TIME = time(23, 59, tzinfo=TZ)
-
-# Home Assistant add-ons must keep SQLite data in /data across restarts/rebuilds.
-if os.getenv("DATABASE_PATH"):
-    DB = os.getenv("DATABASE_PATH")
-elif os.path.isdir("/data"):
-    DB = "/data/duty.db"
-else:
-    DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "duty.db")
-
-# One-time migration from the old relative database path, if it exists.
-_legacy_candidates = {
-    os.path.abspath("duty.db"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "duty.db"),
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Used-A-Ton Customer Price List</title>
+<style>
+:root {
+  --bg: #0b0d10;
+  --panel: rgba(23, 26, 31, .92);
+  --panel-2: #1b1f25;
+  --gold: #d6a64a;
+  --gold-light: #f0ca78;
+  --text: #f6f2e9;
+  --muted: #a9adb4;
+  --line: rgba(214,166,74,.18);
+  --shadow: 0 18px 50px rgba(0,0,0,.32);
 }
-if DB == "/data/duty.db" and not os.path.exists(DB):
-    for _legacy_db in _legacy_candidates:
-        if _legacy_db != DB and os.path.isfile(_legacy_db):
-            try:
-                shutil.copy2(_legacy_db, DB)
-                print(f"Migrated existing duty database from {_legacy_db} to {DB}.")
-                break
-            except OSError as e:
-                print(f"WARNING: Could not migrate legacy duty database {_legacy_db}: {e}")
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 34px 22px 60px;
+  font-family: Inter, "Segoe UI", Tahoma, sans-serif;
+  color: var(--text);
+  text-align: center;
+  background:
+    radial-gradient(circle at 15% 0%, rgba(214,166,74,.10), transparent 28%),
+    radial-gradient(circle at 85% 12%, rgba(151,92,38,.08), transparent 24%),
+    linear-gradient(180deg, #101318 0%, var(--bg) 45%, #080a0c 100%);
+  min-height: 100vh;
+}
+.page-layout { max-width: 1500px; margin: 0 auto; }
+.main-content {
+  position: relative;
+  padding: 30px;
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 26px;
+  background: linear-gradient(180deg, rgba(27,31,37,.88), rgba(14,16,20,.92));
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  overflow: hidden;
+}
+.main-content::before {
+  content: "";
+  position: absolute; inset: 0 0 auto 0; height: 4px;
+  background: linear-gradient(90deg, transparent, var(--gold), var(--gold-light), var(--gold), transparent);
+}
+h2#logo {
+  margin: 6px 0 0;
+  font-size: clamp(38px, 5vw, 62px);
+  line-height: .95;
+  letter-spacing: .11em;
+  font-weight: 900;
+  text-transform: uppercase;
+  color: #fff9ed;
+  text-shadow: 0 6px 26px rgba(0,0,0,.45);
+}
+h2#logo span {
+  color: var(--gold-light);
+  text-shadow:
+    0 0 5px rgba(255, 214, 137, .28),
+    0 0 12px rgba(211, 163, 73, .20),
+    0 0 24px rgba(211, 163, 73, .10);
+}
+h1 {
+  margin: 10px 0 24px;
+  font-size: 14px;
+  letter-spacing: .32em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+.total {
+  max-width: 520px;
+  margin: 0 auto 18px;
+  padding: 20px 26px;
+  border-radius: 18px;
+  border: 1px solid rgba(214,166,74,.25);
+  background: linear-gradient(145deg, rgba(214,166,74,.12), rgba(255,255,255,.025));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 12px 35px rgba(0,0,0,.22);
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--gold-light);
+}
+button {
+  appearance: none;
+  padding: 11px 22px;
+  margin: 3px 4px 15px;
+  border: 1px solid rgba(214,166,74,.35);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #272b31, #1a1d22);
+  color: #f8e8c5;
+  font-weight: 750;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(0,0,0,.18);
+  transition: transform .18s ease, border-color .18s ease, background .18s ease;
+}
+button:hover { transform: translateY(-2px); border-color: var(--gold-light); background: #2d3137; }
+#searchBar {
+  display: block;
+  width: min(760px, 100%);
+  margin: 6px auto 22px;
+  padding: 15px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.10);
+  outline: none;
+  background: rgba(7,9,11,.72);
+  color: white;
+  font-size: 15px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+#searchBar:focus { border-color: rgba(214,166,74,.65); box-shadow: 0 0 0 4px rgba(214,166,74,.08); }
+#searchBar::placeholder { color: #747982; }
+.tabs {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 auto 22px;
+  padding: 7px;
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 16px;
+  background: rgba(7,9,11,.55);
+  border: 1px solid rgba(255,255,255,.06);
+}
+.tab {
+  padding: 10px 15px;
+  border-radius: 10px;
+  cursor: pointer;
+  color: #b9bdc4;
+  font-size: 14px;
+  font-weight: 700;
+  transition: .18s ease;
+}
+.tab:hover { color: white; background: rgba(255,255,255,.045); }
+.tab.active {
+  color: #18130b;
+  background: linear-gradient(135deg, var(--gold-light), var(--gold));
+  box-shadow: 0 7px 18px rgba(214,166,74,.20);
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid rgba(255,255,255,.065);
+  border-radius: 16px;
+  background: rgba(12,14,17,.72);
+  box-shadow: 0 14px 36px rgba(0,0,0,.18);
+}
+th {
+  padding: 14px 12px;
+  color: #e8c67e;
+  background: #171a1f;
+  border-bottom: 1px solid rgba(214,166,74,.18);
+  font-size: 12px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+td {
+  padding: 11px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.045);
+  color: #e8e8e8;
+  transition: background .15s ease;
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: rgba(214,166,74,.055); }
+table th:nth-child(1), table td:nth-child(1) { width: 55%; text-align: left; }
+table th:nth-child(2), table td:nth-child(2) { width: 20%; text-align: center; }
+table th:nth-child(3), table td:nth-child(3) { width: 25%; text-align: center; }
+input[type="number"] {
+  width: 82px;
+  padding: 8px 7px;
+  border-radius: 9px;
+  border: 1px solid rgba(255,255,255,.12);
+  outline: none;
+  background: #0b0d10;
+  color: white;
+  text-align: center;
+  font-weight: 700;
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+input[type="number"]:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(214,166,74,.09); }
+table td:nth-child(2) input[type="number"] { display: block; margin: 0 auto; }
+#searchResults { display: none; width: 100%; }
+body.searching .tabs { opacity: .58; }
+body.searching .tab-content { display: none !important; }
+body.searching #searchResults { display: block; }
+#searchResults table { width: 100%; table-layout: fixed; }
+#searchResults th:nth-child(1), #searchResults td:nth-child(1) { width: 55%; text-align: left; }
+#searchResults th:nth-child(2), #searchResults td:nth-child(2) { width: 20%; text-align: center; }
+#searchResults th:nth-child(3), #searchResults td:nth-child(3) { width: 25%; text-align: center; }
+#searchResults .no-results { padding: 28px; color: var(--muted); text-align: center; }
+@media (max-width: 700px) {
+  body { padding: 14px 9px 30px; }
+  .main-content { padding: 22px 10px; border-radius: 18px; }
+  h2#logo { letter-spacing: .06em; }
+  h1 { letter-spacing: .18em; font-size: 11px; }
+  .total { font-size: 20px; }
+  .tabs { gap: 5px; padding: 5px; }
+  .tab { padding: 8px 9px; font-size: 12px; }
+  th, td { padding: 9px 5px; font-size: 12px; }
+  input[type="number"] { width: 66px; }
+}
+
+/* Used-A-Ton customer price list brand theme */
+:root {
+  color-scheme: dark;
+  --bg: #080609;
+  --panel: rgba(20, 10, 18, .94);
+  --panel-2: #1a1019;
+  --gold: #f2a52c;
+  --gold-light: #ffd375;
+  --pink: #ff168e;
+  --pink-light: #ff69c4;
+  --text: #fff8fc;
+  --muted: #c8b5c3;
+  --line: rgba(255, 39, 159, .28);
+  --shadow: 0 24px 70px rgba(0,0,0,.58);
+}
+body {
+  padding: 28px 20px 64px;
+  background:
+    radial-gradient(ellipse at 50% -12%, rgba(255,22,142,.24), transparent 42%),
+    radial-gradient(circle at 8% 28%, rgba(242,165,44,.10), transparent 24%),
+    radial-gradient(circle at 92% 40%, rgba(255,22,142,.09), transparent 27%),
+    repeating-linear-gradient(135deg, rgba(255,255,255,.012) 0 1px, transparent 1px 7px),
+    linear-gradient(180deg, #160b15 0%, #09070b 46%, #050407 100%);
+}
+.page-layout { max-width: 1440px; }
+.main-content {
+  padding: clamp(18px, 3vw, 42px);
+  border: 1px solid rgba(255,96,183,.35);
+  border-radius: 28px;
+  background: linear-gradient(150deg, rgba(28,15,27,.97), rgba(9,8,12,.97) 58%, rgba(24,13,18,.98));
+  box-shadow: var(--shadow), 0 0 42px rgba(255,22,142,.10), inset 0 1px rgba(255,255,255,.06);
+}
+.main-content::before { height: 3px; background: linear-gradient(90deg, transparent, var(--pink), var(--gold-light), #fff, var(--gold), var(--pink), transparent); }
+h2#logo { margin: 0 auto; line-height: 0; }
+h2#logo img { display: block; width: min(100%, 380px); height: auto; margin: 0 auto; filter: drop-shadow(0 12px 24px rgba(255,0,128,.17)); }
+h1 { margin: 9px 0 24px; color: #f5d9e9; letter-spacing: .24em; font-size: 12px; }
+h1::after { content: "✦  BUY  •  SELL  •  TRADE  •  TREASURE  ✦"; display: block; margin: 10px auto 0; color: var(--gold-light); font-size: 10px; letter-spacing: .22em; text-shadow: 0 0 15px rgba(255,168,55,.32); }
+.total {
+  border-color: rgba(255,192,90,.48);
+  background: linear-gradient(135deg, rgba(255,22,142,.16), rgba(255,255,255,.035) 48%, rgba(242,165,44,.12));
+  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 12px 35px rgba(0,0,0,.28), 0 0 24px rgba(255,22,142,.08);
+  color: var(--gold-light);
+}
+button { border-color: rgba(255,80,174,.45); background: linear-gradient(145deg, #382031, #1a111a); color: #fff1fa; }
+button:hover { border-color: var(--pink-light); background: linear-gradient(145deg, #53213e, #25121f); }
+button:focus-visible, .tab:focus-visible { outline: 2px solid var(--gold-light); outline-offset: 3px; }
+#searchBar { background: rgba(8,6,10,.88); border-color: rgba(255,255,255,.13); }
+#searchBar:focus { border-color: var(--pink-light); box-shadow: 0 0 0 4px rgba(255,22,142,.12); }
+.tabs { background: rgba(7,5,9,.78); border-color: rgba(255,84,171,.19); }
+.tab { color: #d0bdca; }
+.tab:hover { color: #fff; background: rgba(255,22,142,.10); }
+.tab.active { color: #260b1a; background: linear-gradient(135deg, #ffb6e1, #ff3fac 54%, #ffb94e); box-shadow: 0 7px 20px rgba(255,22,142,.24); }
+table { background: rgba(10,7,12,.82); border-color: rgba(255,255,255,.09); }
+th { color: #ffd78f; background: linear-gradient(180deg, #281622, #1b1019); border-bottom-color: rgba(255,67,165,.30); }
+td { color: #f1eaf0; border-bottom-color: rgba(255,255,255,.055); }
+tbody tr:hover td { background: rgba(255,22,142,.075); }
+input[type="number"] { background: #0a080c; border-color: rgba(255,255,255,.16); }
+input[type="number"]:focus { border-color: var(--pink-light); box-shadow: 0 0 0 3px rgba(255,22,142,.12); }
+@media (max-width: 700px) {
+  body { padding: 12px 8px 30px; }
+  .main-content { padding: 18px 10px; border-radius: 19px; }
+  h1 { letter-spacing: .14em; }
+  h1::after { font-size: 8px; letter-spacing: .12em; }
+}
+</style>
+</head>
+<body>
+<div class="page-layout">
+<div class="main-content">
+<h2 id="logo"><img alt="Used-A-Ton Pawnshop" src="used-a-ton-logo.png"/></h2>
+<h1>Pawnshop Price List</h1>
+<div class="total" id="totalPrices">
+    Total: $0.00
+</div>
+<button onclick="calculatePrices()">Calculate</button>
+<button onclick="clearPrices()" type="button">Clear</button>
+<input id="searchBar" oninput="searchItems()" placeholder="Search..." type="text"/>
+<div class="tabs">
+<div class="tab active" data-tab="jewelry" onclick="switchTab('jewelry', this)">
+        Jewelry
+    </div>
+<div class="tab" data-tab="electronics" onclick="switchTab('electronics', this)">
+        Electronics
+    </div>
+<div class="tab" data-tab="eggs" onclick="switchTab('eggs', this)">
+        Eggs
+    </div>
+<div class="tab" data-tab="metal" onclick="switchTab('metal', this)">
+        Metal Detecting
+    </div>
+<div class="tab" data-tab="relics" onclick="switchTab('relics', this)">
+        Relics &amp; Art
+    </div>
+<div class="tab" data-tab="misc" onclick="switchTab('misc', this)">
+        Miscellaneous
+    </div>
+<div class="tab" data-tab="heist" onclick="switchTab('heist', this)">
+        Heist
+    </div>
+</div>
+<!-- =====================================================
+     SEARCH RESULTS
+     ===================================================== -->
+<div id="searchResults">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Price</th>
+</tr>
+</thead>
+<tbody id="searchResultsBody"></tbody>
+</table>
+</div>
+<!-- =====================================================
+     JEWELRY
+     ===================================================== -->
+<div class="tab-content active" id="jewelry">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Buying Price</th>
+</tr>
+</thead>
+<tbody id="jewelryItems"><tr><td>10K Gold Chain</td><td><input min="0" name="10K Gold Chain" type="number" value="0"/></td><td>$2,800.00</td></tr><tr><td>Asylum Gold Necklace</td><td><input min="0" name="Asylum Gold Necklace" type="number" value="0"/></td><td>$4,400.00</td></tr><tr><td>Asylum Prime Necklace</td><td><input min="0" name="Asylum Prime Necklace" type="number" value="0"/></td><td>$5,200.00</td></tr><tr><td>Canary Diamond Necklace</td><td><input min="0" name="Canary Diamond Necklace" type="number" value="0"/></td><td>$16,800.00</td></tr><tr><td>Canary Diamond Necklace Silver</td><td><input min="0" name="Canary Diamond Necklace Silver" type="number" value="0"/></td><td>$16,720.00</td></tr><tr><td>Diamond</td><td><input min="0" name="Diamond" type="number" value="0"/></td><td>$480.00</td></tr><tr><td>Diamond Bar</td><td><input min="0" name="Diamond Bar" type="number" value="0"/></td><td>$1,600.00</td></tr><tr><td>Diamond Earring / Silver</td><td><input min="0" name="Diamond Earring / Silver" type="number" value="0"/></td><td>$720.00</td></tr><tr><td>Diamond Necklace</td><td><input min="0" name="Diamond Necklace" type="number" value="0"/></td><td>$3,680.00</td></tr><tr><td>Diamond Ring Silver</td><td><input min="0" name="Diamond Ring Silver" type="number" value="0"/></td><td>$720.00</td></tr><tr><td>Dragon Ring</td><td><input min="0" name="Dragon Ring" type="number" value="0"/></td><td>$1,280.00</td></tr><tr><td>Emerald</td><td><input min="0" name="Emerald" type="number" value="0"/></td><td>$320.00</td></tr><tr><td>Emerald Earring / Silver</td><td><input min="0" name="Emerald Earring / Silver" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Emerald Ring / Silver</td><td><input min="0" name="Emerald Ring / Silver" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Gemstone Necklace</td><td><input min="0" name="Gemstone Necklace" type="number" value="0"/></td><td>$3,800.00</td></tr><tr><td>Gemstone Necklace Silver</td><td><input min="0" name="Gemstone Necklace Silver" type="number" value="0"/></td><td>$3,720.00</td></tr><tr><td>Gold Chain</td><td><input min="0" name="Gold Chain" type="number" value="0"/></td><td>$480.00</td></tr><tr><td>Gold Earring / Ingot</td><td><input min="0" name="Gold Earring / Ingot" type="number" value="0"/></td><td>$320.00</td></tr><tr><td>Gold Ring</td><td><input min="0" name="Gold Ring" type="number" value="0"/></td><td>$400.00</td></tr><tr><td>Goldbar</td><td><input min="0" name="Goldbar" type="number" value="0"/></td><td>$1,400.00</td></tr><tr><td>Rolex/Golden Watch</td><td><input min="0" name="Rolex/Golden Watch" type="number" value="0"/></td><td>$320.00</td></tr><tr><td>Ruby</td><td><input min="0" name="Ruby" type="number" value="0"/></td><td>$280.00</td></tr><tr><td>Ruby Chain</td><td><input min="0" name="Ruby Chain" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Ruby Earring</td><td><input min="0" name="Ruby Earring" type="number" value="0"/></td><td>$560.00</td></tr><tr><td>Ruby Earring Silver</td><td><input min="0" name="Ruby Earring Silver" type="number" value="0"/></td><td>$559.20</td></tr><tr><td>Ruby Ring / Silver</td><td><input min="0" name="Ruby Ring / Silver" type="number" value="0"/></td><td>$560.00</td></tr><tr><td>Ruby Wolf Earrings</td><td><input min="0" name="Ruby Wolf Earrings" type="number" value="0"/></td><td>$1,280.00</td></tr><tr><td>Sapphire</td><td><input min="0" name="Sapphire" type="number" value="0"/></td><td>$240.00</td></tr><tr><td>Sapphire Earring</td><td><input min="0" name="Sapphire Earring" type="number" value="0"/></td><td>$480.00</td></tr><tr><td>Sapphire Necklace</td><td><input min="0" name="Sapphire Necklace" type="number" value="0"/></td><td>$960.00</td></tr><tr><td>Sapphire Necklace Silver</td><td><input min="0" name="Sapphire Necklace Silver" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Sapphire Ring / Silver</td><td><input min="0" name="Sapphire Ring / Silver" type="number" value="0"/></td><td>$480.00</td></tr><tr><td>Silver Chain</td><td><input min="0" name="Silver Chain" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Silver Earring long</td><td><input min="0" name="Silver Earring long" type="number" value="0"/></td><td>$320.00</td></tr><tr><td>Silver Ring</td><td><input min="0" name="Silver Ring" type="number" value="0"/></td><td>$520.00</td></tr><tr><td>Skull Ring</td><td><input min="0" name="Skull Ring" type="number" value="0"/></td><td>$1,280.00</td></tr><tr><td>Sovereign Pendant</td><td><input min="0" name="Sovereign Pendant" type="number" value="0"/></td><td>$9,600.00</td></tr><tr><td>Uncut Diamond</td><td><input min="0" name="Uncut Diamond" type="number" value="0"/></td><td>$80.00</td></tr><tr><td>Uncut Emerald</td><td><input min="0" name="Uncut Emerald" type="number" value="0"/></td><td>$56.00</td></tr><tr><td>Uncut Ruby</td><td><input min="0" name="Uncut Ruby" type="number" value="0"/></td><td>$48.00</td></tr><tr><td>Uncut Sapphire</td><td><input min="0" name="Uncut Sapphire" type="number" value="0"/></td><td>$40.00</td></tr></tbody>
+</table>
+</div>
+<!-- =====================================================
+     ELECTRONICS
+     ===================================================== -->
+<div class="tab-content" id="electronics">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Buying Price</th>
+</tr>
+</thead>
+<tbody id="electronicsItems"><tr><td>All-in-One Printer</td><td><input min="0" name="All-in-One Printer" type="number" value="0"/></td><td>$4,000.00</td></tr><tr><td>Astronomy Telescope</td><td><input min="0" name="Astronomy Telescope" type="number" value="0"/></td><td>$4,800.00</td></tr><tr><td>Audio System</td><td><input min="0" name="Audio System" type="number" value="0"/></td><td>$4,400.00</td></tr><tr><td>Camera</td><td><input min="0" name="Camera" type="number" value="0"/></td><td>$4,400.00</td></tr><tr><td>Classic Microwave</td><td><input min="0" name="Classic Microwave" type="number" value="0"/></td><td>$3,600.00</td></tr><tr><td>Classic Toaster</td><td><input min="0" name="Classic Toaster" type="number" value="0"/></td><td>$800.00</td></tr><tr><td>Coffee Maker</td><td><input min="0" name="Coffee Maker" type="number" value="0"/></td><td>$2,400.00</td></tr><tr><td>CRT Television</td><td><input min="0" name="CRT Television" type="number" value="0"/></td><td>$2,800.00</td></tr><tr><td>Data Drive</td><td><input min="0" name="Data Drive" type="number" value="0"/></td><td>$4,400.00</td></tr><tr><td>Digital Scales</td><td><input min="0" name="Digital Scales" type="number" value="0"/></td><td>$1,600.00</td></tr><tr><td>Electric Kettle</td><td><input min="0" name="Electric Kettle" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Gaming Console</td><td><input min="0" name="Gaming Console" type="number" value="0"/></td><td>$6,000.00</td></tr><tr><td>Gang Tablet</td><td><input min="0" name="Gang Tablet" type="number" value="0"/></td><td>$28,000.00</td></tr><tr><td>iPhone 13</td><td><input min="0" name="iPhone 13" type="number" value="0"/></td><td>$280.00</td></tr><tr><td>Laptop</td><td><input min="0" name="Laptop" type="number" value="0"/></td><td>$6,800.00</td></tr><tr><td>Laptop (Black with blue screen)</td><td><input min="0" name="Laptop (Black with blue screen)" type="number" value="0"/></td><td>$440.00</td></tr><tr><td>LCD Monitor</td><td><input min="0" name="LCD Monitor" type="number" value="0"/></td><td>$3,600.00</td></tr><tr><td>LED Television</td><td><input min="0" name="LED Television" type="number" value="0"/></td><td>$5,200.00</td></tr><tr><td>Microwave</td><td><input min="0" name="Microwave" type="number" value="0"/></td><td>$3,600.00</td></tr><tr><td>Modern Microwave</td><td><input min="0" name="Modern Microwave" type="number" value="0"/></td><td>$4,400.00</td></tr><tr><td>Modern Toaster</td><td><input min="0" name="Modern Toaster" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Music Dock</td><td><input min="0" name="Music Dock" type="number" value="0"/></td><td>$1,600.00</td></tr><tr><td>Portable Boombox</td><td><input min="0" name="Portable Boombox" type="number" value="0"/></td><td>$2,000.00</td></tr><tr><td>Professional Hair Dryer</td><td><input min="0" name="Professional Hair Dryer" type="number" value="0"/></td><td>$1,600.00</td></tr><tr><td>PS5</td><td><input min="0" name="PS5" type="number" value="0"/></td><td>$4,400.00</td></tr><tr><td>Radio Cassette Player</td><td><input min="0" name="Radio Cassette Player" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Samsung Phone</td><td><input min="0" name="Samsung Phone" type="number" value="0"/></td><td>$4,400.00</td></tr><tr><td>Smart Television</td><td><input min="0" name="Smart Television" type="number" value="0"/></td><td>$7,600.00</td></tr><tr><td>Stand Mixer</td><td><input min="0" name="Stand Mixer" type="number" value="0"/></td><td>$3,200.00</td></tr><tr><td>Stolen Computer</td><td><input min="0" name="Stolen Computer" type="number" value="0"/></td><td>$1,240.00</td></tr><tr><td>Stolen TV</td><td><input min="0" name="Stolen TV" type="number" value="0"/></td><td>$1,240.00</td></tr><tr><td>Tablet</td><td><input min="0" name="Tablet" type="number" value="0"/></td><td>$440.00</td></tr><tr><td>VCR Player</td><td><input min="0" name="VCR Player" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Xbox X</td><td><input min="0" name="Xbox X" type="number" value="0"/></td><td>$4,400.00</td></tr></tbody>
+</table>
+</div>
+<!-- =====================================================
+     EGGS
+     ===================================================== -->
+<div class="tab-content" id="eggs">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Buying Price</th>
+</tr>
+</thead>
+<tbody id="eggsItems"><tr><td>Asylum Gold Egg</td><td><input min="0" name="Asylum Gold Egg" type="number" value="0"/></td><td>$80,000.00</td></tr><tr><td>Asylum Prime Egg</td><td><input min="0" name="Asylum Prime Egg" type="number" value="0"/></td><td>$120,000.00</td></tr><tr><td>Ballas Egg</td><td><input min="0" name="Ballas Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Boerboel Egg</td><td><input min="0" name="Boerboel Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Boertjies Egg</td><td><input min="0" name="Boertjies Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Cartel Egg</td><td><input min="0" name="Cartel Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Dino Egg</td><td><input min="0" name="Dino Egg" type="number" value="0"/></td><td>$12,000.00</td></tr><tr><td>GSF Egg</td><td><input min="0" name="GSF Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Lost Egg</td><td><input min="0" name="Lost Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Mafia Egg</td><td><input min="0" name="Mafia Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Marabunta Egg</td><td><input min="0" name="Marabunta Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>SOA Egg</td><td><input min="0" name="SOA Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Vagos Egg</td><td><input min="0" name="Vagos Egg" type="number" value="0"/></td><td>$44,000.00</td></tr><tr><td>Yakhuza Egg</td><td><input min="0" name="Yakhuza Egg" type="number" value="0"/></td><td>$44,000.00</td></tr></tbody>
+</table>
+</div>
+<!-- =====================================================
+     METAL DETECTING
+     ===================================================== -->
+<div class="tab-content" id="metal">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Buying Price</th>
+</tr>
+</thead>
+<tbody id="metalItems"><tr><td>Ancient Coin</td><td><input min="0" name="Ancient Coin" type="number" value="0"/></td><td>$1,040.00</td></tr><tr><td>Black Watch</td><td><input min="0" name="Black Watch" type="number" value="0"/></td><td>$520.00</td></tr><tr><td>Bottlecap</td><td><input min="0" name="Bottlecap" type="number" value="0"/></td><td>$8.00</td></tr><tr><td>Broken Junk</td><td><input min="0" name="Broken Junk" type="number" value="0"/></td><td>$80.00</td></tr><tr><td>Copper Nugget</td><td><input min="0" name="Copper Nugget" type="number" value="0"/></td><td>$360.00</td></tr><tr><td>Crushed Can</td><td><input min="0" name="Crushed Can" type="number" value="0"/></td><td>$160.00</td></tr><tr><td>Diamond Necklace Gold</td><td><input min="0" name="Diamond Necklace Gold" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Diamond Ring Gold</td><td><input min="0" name="Diamond Ring Gold" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Earpod</td><td><input min="0" name="Earpod" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Gold Dollar</td><td><input min="0" name="Gold Dollar" type="number" value="0"/></td><td>$1,040.00</td></tr><tr><td>Gold Earrings</td><td><input min="0" name="Gold Earrings" type="number" value="0"/></td><td>$960.00</td></tr><tr><td>Gold Necklace</td><td><input min="0" name="Gold Necklace" type="number" value="0"/></td><td>$1,120.00</td></tr><tr><td>Gold Nugget</td><td><input min="0" name="Gold Nugget" type="number" value="0"/></td><td>$1,400.00</td></tr><tr><td>Gold Ounce</td><td><input min="0" name="Gold Ounce" type="number" value="0"/></td><td>$1,480.00</td></tr><tr><td>Gold Ring</td><td><input min="0" name="Gold Ring" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Half Dollar</td><td><input min="0" name="Half Dollar" type="number" value="0"/></td><td>$680.00</td></tr><tr><td>Iron Nugget</td><td><input min="0" name="Iron Nugget" type="number" value="0"/></td><td>$600.00</td></tr><tr><td>Lighter</td><td><input min="0" name="Lighter" type="number" value="0"/></td><td>$9.60</td></tr><tr><td>Metal Can</td><td><input min="0" name="Metal Can" type="number" value="0"/></td><td>$11.20</td></tr><tr><td>Nails</td><td><input min="0" name="Nails" type="number" value="0"/></td><td>$14.40</td></tr><tr><td>Needle</td><td><input min="0" name="Needle" type="number" value="0"/></td><td>$16.00</td></tr><tr><td>Nickle</td><td><input min="0" name="Nickle" type="number" value="0"/></td><td>$240.00</td></tr><tr><td>Nutails</td><td><input min="0" name="Nutails" type="number" value="0"/></td><td>$17.60</td></tr><tr><td>Old Shotgunshell</td><td><input min="0" name="Old Shotgunshell" type="number" value="0"/></td><td>$20.00</td></tr><tr><td>Paperclip</td><td><input min="0" name="Paperclip" type="number" value="0"/></td><td>$22.40</td></tr><tr><td>Platinum Nugget</td><td><input min="0" name="Platinum Nugget" type="number" value="0"/></td><td>$1,360.00</td></tr><tr><td>Presidential Watch</td><td><input min="0" name="Presidential Watch" type="number" value="0"/></td><td>$1,120.00</td></tr><tr><td>Pulltab</td><td><input min="0" name="Pulltab" type="number" value="0"/></td><td>$28.00</td></tr><tr><td>Quarter</td><td><input min="0" name="Quarter" type="number" value="0"/></td><td>$480.00</td></tr><tr><td>Relic Revolver</td><td><input min="0" name="Relic Revolver" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Rusty Ball</td><td><input min="0" name="Rusty Ball" type="number" value="0"/></td><td>$36.00</td></tr><tr><td>Rusty Iron Ball</td><td><input min="0" name="Rusty Iron Ball" type="number" value="0"/></td><td>$44.00</td></tr><tr><td>Rusty Junk</td><td><input min="0" name="Rusty Junk" type="number" value="0"/></td><td>$56.00</td></tr><tr><td>Rusty Nails</td><td><input min="0" name="Rusty Nails" type="number" value="0"/></td><td>$72.00</td></tr><tr><td>Rusty Pliers</td><td><input min="0" name="Rusty Pliers" type="number" value="0"/></td><td>$88.00</td></tr><tr><td>Rusty Ring</td><td><input min="0" name="Rusty Ring" type="number" value="0"/></td><td>$160.00</td></tr><tr><td>Rusty Scissors</td><td><input min="0" name="Rusty Scissors" type="number" value="0"/></td><td>$176.00</td></tr><tr><td>Rusty Screwdriver</td><td><input min="0" name="Rusty Screwdriver" type="number" value="0"/></td><td>$184.00</td></tr><tr><td>Rusty Spring</td><td><input min="0" name="Rusty Spring" type="number" value="0"/></td><td>$200.00</td></tr><tr><td>Screw</td><td><input min="0" name="Screw" type="number" value="0"/></td><td>$216.00</td></tr><tr><td>Silver Dime</td><td><input min="0" name="Silver Dime" type="number" value="0"/></td><td>$520.00</td></tr><tr><td>Silver Earrings Hoops</td><td><input min="0" name="Silver Earrings Hoops" type="number" value="0"/></td><td>$800.00</td></tr><tr><td>Silver Ounce</td><td><input min="0" name="Silver Ounce" type="number" value="0"/></td><td>$960.00</td></tr><tr><td>Silver Ring</td><td><input min="0" name="Silver Ring" type="number" value="0"/></td><td>$800.00</td></tr><tr><td>Wheat Penny</td><td><input min="0" name="Wheat Penny" type="number" value="0"/></td><td>$224.00</td></tr></tbody>
+</table>
+</div>
+<!-- =====================================================
+     RELICS & ART
+     ===================================================== -->
+<div class="tab-content" id="relics">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Buying Price</th>
+</tr>
+</thead>
+<tbody id="relicsItems"><tr><td>Art 1</td><td><input min="0" name="Art 1" type="number" value="0"/></td><td>$9,200.00</td></tr><tr><td>Art Painting</td><td><input min="0" name="Art Painting" type="number" value="0"/></td><td>$9,200.00</td></tr><tr><td>Asylum Doll</td><td><input min="0" name="Asylum Doll" type="number" value="0"/></td><td>$28,000.00</td></tr><tr><td>Fancy Kitty Art</td><td><input min="0" name="Fancy Kitty Art" type="number" value="0"/></td><td>$9,200.00</td></tr><tr><td>Presidential Kitty Art</td><td><input min="0" name="Presidential Kitty Art" type="number" value="0"/></td><td>$9,200.00</td></tr><tr><td>Obi Jesus Painting</td><td><input min="0" name="Obi Jesus Painting" type="number" value="0"/></td><td>$9,200.00</td></tr><tr><td>Captain Skull</td><td><input min="0" name="Captain Skull" type="number" value="0"/></td><td>$140,000.00</td></tr><tr><td>Captain Skull - KW</td><td><input min="0" name="Captain Skull - KW" type="number" value="0"/></td><td>$150,000.00</td></tr><tr><td>Decorated Pot</td><td><input min="0" name="Decorated Pot" type="number" value="0"/></td><td>$1,920.00</td></tr><tr><td>E Chain</td><td><input min="0" name="E Chain" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Fossil</td><td><input min="0" name="Fossil" type="number" value="0"/></td><td>$1,080.00</td></tr><tr><td>Mythic Fossil</td><td><input min="0" name="Mythic Fossil" type="number" value="0"/></td><td>$1,120.00</td></tr><tr><td>Onyx Relic</td><td><input min="0" name="Onyx Relic" type="number" value="0"/></td><td>$960.00</td></tr><tr><td>Panther</td><td><input min="0" name="Panther" type="number" value="0"/></td><td>$60,000.00</td></tr><tr><td>Pot</td><td><input min="0" name="Pot" type="number" value="0"/></td><td>$920.00</td></tr><tr><td>Prince Ruby</td><td><input min="0" name="Prince Ruby" type="number" value="0"/></td><td>$1,280.00</td></tr><tr><td>Rare Fossil</td><td><input min="0" name="Rare Fossil" type="number" value="0"/></td><td>$1,200.00</td></tr><tr><td>Relic</td><td><input min="0" name="Relic" type="number" value="0"/></td><td>$1,000.00</td></tr><tr><td>Skull</td><td><input min="0" name="Skull" type="number" value="0"/></td><td>$840.00</td></tr><tr><td>Slate Tablet</td><td><input min="0" name="Slate Tablet" type="number" value="0"/></td><td>$1,440.00</td></tr><tr><td>Time Capsule</td><td><input min="0" name="Time Capsule" type="number" value="0"/></td><td>$2,160.00</td></tr><tr><td>Canary Diamond</td><td><input min="0" name="Canary Diamond" type="number" value="0"/></td><td>$16,000.00</td></tr></tbody>
+</table>
+</div>
+<!-- =====================================================
+     MISCELLANEOUS
+     ===================================================== -->
+<div class="tab-content" id="misc">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Buying Price</th>
+</tr>
+</thead>
+<tbody id="miscItems"><tr><td>Deluxe Treasure Map</td><td><input min="0" name="Deluxe Treasure Map" type="number" value="0"/></td><td>$720.00</td></tr><tr><td>Dirty Money (enter amount)</td><td><input min="0" name="Dirty Money (enter amount)" type="number" value="0"/></td><td>$0.80</td></tr><tr><td>Perlemoen</td><td><input min="0" name="Perlemoen" type="number" value="0"/></td><td>$8,000.00</td></tr><tr><td>Pogo</td><td><input min="0" name="Pogo" type="number" value="0"/></td><td>$60,000.00</td></tr><tr><td>Premium Treasure Map</td><td><input min="0" name="Premium Treasure Map" type="number" value="0"/></td><td>$640.00</td></tr><tr><td>Treasure Map</td><td><input min="0" name="Treasure Map" type="number" value="0"/></td><td>$520.00</td></tr><tr><td>Warehouse Key</td><td><input min="0" name="Warehouse Key" type="number" value="0"/></td><td>$400.00</td></tr></tbody>
+</table>
+</div>
+<!-- =====================================================
+     HEIST
+     ===================================================== -->
+<div class="tab-content" id="heist">
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Quantity</th>
+<th>Selling Price</th>
+</tr>
+</thead>
+<tbody id="heistItems"><tr><td>HEIST - C4 Bomb</td><td><input min="0" name="HEIST - C4 Bomb" type="number" value="0"/></td><td>$80,000.00</td></tr><tr><td>HEIST - Drill</td><td><input min="0" name="HEIST - Drill" type="number" value="0"/></td><td>$9,000.00</td></tr><tr><td>HEIST - Big Drill</td><td><input min="0" name="HEIST - Big Drill" type="number" value="0"/></td><td>$20,000.00</td></tr><tr><td>HEIST - Gas Cutter</td><td><input min="0" name="HEIST - Gas Cutter" type="number" value="0"/></td><td>$20,000.00</td></tr><tr><td>HEIST - Cutter</td><td><input min="0" name="HEIST - Cutter" type="number" value="0"/></td><td>$25,000.00</td></tr><tr><td>HEIST - Large Drill</td><td><input min="0" name="HEIST - Large Drill" type="number" value="0"/></td><td>$15,000.00</td></tr><tr><td>HEIST - Blue Bag</td><td><input min="0" name="HEIST - Blue Bag" type="number" value="0"/></td><td>$6,500.00</td></tr><tr><td>HEIST - Bolt Cutter</td><td><input min="0" name="HEIST - Bolt Cutter" type="number" value="0"/></td><td>$16,000.00</td></tr><tr><td>HEIST - USB Pink</td><td><input min="0" name="HEIST - USB Pink" type="number" value="0"/></td><td>$9,000.00</td></tr><tr><td>HEIST - Green Laptop</td><td><input min="0" name="HEIST - Green Laptop" type="number" value="0"/></td><td>$25,000.00</td></tr><tr><td>HEIST - Advanced Drill</td><td><input min="0" name="HEIST - Advanced Drill" type="number" value="0"/></td><td>$15,000.00</td></tr><tr><td>HEIST - Plasma Cutter</td><td><input min="0" name="HEIST - Plasma Cutter" type="number" value="0"/></td><td>$15,000.00</td></tr><tr><td>HEIST - Gold Laptop</td><td><input min="0" name="HEIST - Gold Laptop" type="number" value="0"/></td><td>$35,000.00</td></tr><tr><td>HEIST - Hacking Laptop</td><td><input min="0" name="HEIST - Hacking Laptop" type="number" value="0"/></td><td>$35,000.00</td></tr><tr><td>HEIST - Advanced Lockpick</td><td><input min="0" name="HEIST - Advanced Lockpick" type="number" value="0"/></td><td>$10,000.00</td></tr><tr><td>HEIST - Lockpick</td><td><input min="0" name="HEIST - Lockpick" type="number" value="0"/></td><td>$12,000.00</td></tr><tr><td>HEIST - Doorlockpick</td><td><input min="0" name="HEIST - Doorlockpick" type="number" value="0"/></td><td>$12,000.00</td></tr><tr><td>HEIST - Ammunation Pass</td><td><input min="0" name="HEIST - Ammunation Pass" type="number" value="0"/></td><td>$10,000.00</td></tr><tr><td>HEIST - PD Pass</td><td><input min="0" name="HEIST - PD Pass" type="number" value="0"/></td><td>$10,000.00</td></tr><tr><td>HEIST - Thermite</td><td><input min="0" name="HEIST - Thermite" type="number" value="0"/></td><td>$30,000.00</td></tr><tr><td>HEIST - Gatecrack</td><td><input min="0" name="HEIST - Gatecrack" type="number" value="0"/></td><td>$8,000.00</td></tr><tr><td>HEIST - Bandage x10</td><td><input min="0" name="HEIST - Bandage x10" type="number" value="0"/></td><td>$40,000.00</td></tr><tr><td>HEIST - Hacking Device</td><td><input min="0" name="HEIST - Hacking Device" type="number" value="0"/></td><td>$8,000.00</td></tr><tr><td>HEIST - Software USB</td><td><input min="0" name="HEIST - Software USB" type="number" value="0"/></td><td>$8,000.00</td></tr><tr><td>HEIST - USB Device</td><td><input min="0" name="HEIST - USB Device" type="number" value="0"/></td><td>$8,000.00</td></tr><tr><td>HEIST - Switch Blade</td><td><input min="0" name="HEIST - Switch Blade" type="number" value="0"/></td><td>$15,000.00</td></tr></tbody>
+</table>
+</div>
+</div>
+</div>
+<script>
+
+/* ========================================================
+   CLEAR
+   Clears:
+   - All quantities
+   - Search bar
+   - Search results
+   - Total
+   ======================================================== */
+
+function clearPrices() {
+
+    document
+        .querySelectorAll('.tab-content input[type="number"]')
+        .forEach(input => {
+            input.value = 0;
+        });
+
+    const searchBar = document.getElementById('searchBar');
+
+    if (searchBar) {
+        searchBar.value = '';
+    }
+
+    document.body.classList.remove('searching');
+
+    const searchResultsBody =
+        document.getElementById('searchResultsBody');
+
+    if (searchResultsBody) {
+        searchResultsBody.innerHTML = '';
+    }
+
+    restoreActiveTab();
+
+    updateTotal();
+}
 
 
-# ============================================================
-# REFUND MESSAGE MOVER (separate from clocking/LOA features)
-# ============================================================
+/* ========================================================
+   RESTORE ACTIVE TAB
+   ======================================================== */
 
-REFUNDS_CHANNEL_ID = 1552971429761523722
-REFUNDS_COMPLETED_CHANNEL_ID = 1561808012505518150
-REFUND_MOVE_EMOJI = "✅"
+function restoreActiveTab() {
+
+    const sections =
+        document.querySelectorAll('.tab-content');
+
+    sections.forEach(section => {
+        section.classList.remove('active');
+    });
+
+    let activeTab =
+        document.querySelector('.tab.active');
+
+    if (!activeTab) {
+
+        activeTab =
+            document.querySelector('.tab');
+
+        if (activeTab) {
+            activeTab.classList.add('active');
+        }
+
+    }
+
+    if (!activeTab) {
+        return;
+    }
+
+    const tabId =
+        activeTab.dataset.tab;
+
+    const selected =
+        document.getElementById(tabId);
+
+    if (selected) {
+        selected.classList.add('active');
+    }
+}
 
 
-# ==============================
-# DISCORD SETUP
-# ==============================
+/* ========================================================
+   TAB SWITCHING
+   ======================================================== */
 
-intents = discord.Intents.default()
+function switchTab(tab, el) {
 
-intents.members = True
-intents.message_content = True
-intents.reactions = True
+    document.querySelectorAll('.tab').forEach(t => {
+        t.classList.remove('active');
+    });
 
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents
-)
+    if (el) {
+        el.classList.add('active');
+    }
+
+    /*
+       If there is text in the search bar,
+       stay in search mode.
+    */
+
+    const filter =
+        document.getElementById('searchBar')
+            .value
+            .trim();
+
+    if (filter) {
+        searchItems();
+        return;
+    }
+
+    document.body.classList.remove('searching');
+
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.remove('active');
+    });
+
+    const selected =
+        document.getElementById(tab);
+
+    if (selected) {
+        selected.classList.add('active');
+    }
+}
 
 
-# ==============================
-# DATABASE
-# ==============================
+/* ========================================================
+   SEARCH
 
-def db():
-    c = sqlite3.connect(DB)
-    c.row_factory = sqlite3.Row
-    return c
+   Instead of opening several separate tables,
+   this creates ONE clean search-results table.
+   ======================================================== */
+
+function searchItems() {
+
+    const searchBar =
+        document.getElementById('searchBar');
+
+    const filter =
+        searchBar.value
+            .trim()
+            .toLowerCase();
+
+    const resultsBody =
+        document.getElementById('searchResultsBody');
 
 
-def init_db():
-    print(f"Using duty database: {os.path.abspath(DB)}")
-    with db() as c:
+    /*
+       SEARCH EMPTY:
+       Return to normal tab layout.
+    */
 
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS active (
-                user_id INTEGER PRIMARY KEY,
-                clock_in TEXT NOT NULL
+    if (!filter) {
+
+        document.body.classList.remove('searching');
+
+        resultsBody.innerHTML = '';
+
+        restoreActiveTab();
+
+        return;
+    }
+
+
+    /*
+       SEARCH ACTIVE
+    */
+
+    document.body.classList.add('searching');
+
+    resultsBody.innerHTML = '';
+
+    let matchCount = 0;
+
+
+    document
+        .querySelectorAll('.tab-content tbody tr')
+        .forEach(originalRow => {
+
+            const itemCell =
+                originalRow.cells[0];
+
+            if (!itemCell) {
+                return;
+            }
+
+
+            /*
+               Search ONLY item names.
+               Prices will not accidentally match.
+            */
+
+            const itemName =
+                itemCell.innerText
+                    .trim()
+                    .toLowerCase();
+
+
+            if (!itemName.includes(filter)) {
+                return;
+            }
+
+
+            matchCount++;
+
+
+            const originalInput =
+                originalRow.querySelector(
+                    'input[type="number"]'
+                );
+
+
+            const priceText =
+                originalRow.cells[2]
+                    ? originalRow.cells[2].innerText.trim()
+                    : '$0.00';
+
+
+            /*
+               Create a clean search row.
+            */
+
+            const resultRow =
+                document.createElement('tr');
+
+
+            const itemTd =
+                document.createElement('td');
+
+            itemTd.textContent =
+                itemCell.innerText.trim();
+
+
+            const quantityTd =
+                document.createElement('td');
+
+
+            const searchInput =
+                document.createElement('input');
+
+            searchInput.type = 'number';
+
+            searchInput.min = '0';
+
+            searchInput.value =
+                originalInput
+                    ? originalInput.value
+                    : 0;
+
+
+            /*
+               Link this search input back to the
+               ORIGINAL item input.
+
+               This means quantities entered while
+               searching are still saved in the
+               correct original item.
+            */
+
+            searchInput.addEventListener(
+                'input',
+                () => {
+
+                    let value =
+                        parseInt(
+                            searchInput.value,
+                            10
+                        );
+
+                    if (
+                        isNaN(value) ||
+                        value < 0
+                    ) {
+                        value = 0;
+                    }
+
+
+                    if (originalInput) {
+                        originalInput.value = value;
+                    }
+
+
+                    updateTotal();
+
+                }
+            );
+
+
+            quantityTd.appendChild(
+                searchInput
+            );
+
+
+            const priceTd =
+                document.createElement('td');
+
+            priceTd.textContent =
+                priceText;
+
+
+            resultRow.appendChild(
+                itemTd
+            );
+
+            resultRow.appendChild(
+                quantityTd
+            );
+
+            resultRow.appendChild(
+                priceTd
+            );
+
+
+            resultsBody.appendChild(
+                resultRow
+            );
+
+        });
+
+
+    /*
+       No results message.
+    */
+
+    if (matchCount === 0) {
+
+        const noResultsRow =
+            document.createElement('tr');
+
+
+        const noResultsCell =
+            document.createElement('td');
+
+
+        noResultsCell.colSpan = 3;
+
+        noResultsCell.className =
+            'no-results';
+
+        noResultsCell.textContent =
+            'No items found.';
+
+
+        noResultsRow.appendChild(
+            noResultsCell
+        );
+
+
+        resultsBody.appendChild(
+            noResultsRow
+        );
+
+    }
+
+}
+
+
+/* ========================================================
+   CALCULATE TOTAL
+
+   Standard sections:
+   Uses Buying Price.
+
+   Heist:
+   Uses Selling Price.
+
+   Because both are the 3rd displayed column,
+   cell index 2 works for both.
+   ======================================================== */
+
+function calculateTotal() {
+
+    let total = 0;
+
+
+    document
+        .querySelectorAll('.tab-content tbody tr')
+        .forEach(row => {
+
+            const input =
+                row.querySelector(
+                    'input[type="number"]'
+                );
+
+
+            if (!input) {
+                return;
+            }
+
+
+            const quantity =
+                parseInt(
+                    input.value,
+                    10
+                ) || 0;
+
+
+            if (quantity <= 0) {
+                return;
+            }
+
+
+            const priceCell =
+                row.cells[2];
+
+
+            if (!priceCell) {
+                return;
+            }
+
+
+            const price =
+                parseFloat(
+                    priceCell
+                        .innerText
+                        .replace(/[$,]/g, '')
+                ) || 0;
+
+
+            total +=
+                price * quantity;
+
+        });
+
+
+    return total;
+}
+
+
+/* ========================================================
+   MONEY FORMAT
+   ======================================================== */
+
+function money(value) {
+
+    return '$' +
+        Number(value).toLocaleString(
+            'en-US',
+            {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }
+        );
+
+}
+
+
+/* ========================================================
+   UPDATE TOTAL
+   ======================================================== */
+
+function updateTotal() {
+
+    const totalBox =
+        document.getElementById(
+            'totalPrices'
+        );
+
+
+    if (!totalBox) {
+        return;
+    }
+
+
+    totalBox.textContent =
+        'Total: ' +
+        money(
+            calculateTotal()
+        );
+
+}
+
+
+/* ========================================================
+   CALCULATE BUTTON
+   ======================================================== */
+
+function calculatePrices() {
+    updateTotal();
+}
+
+
+/* ========================================================
+   AUTO UPDATE TOTAL
+
+   Only listens to the ORIGINAL item tables.
+   Search-result inputs already update their
+   original inputs and call updateTotal().
+   ======================================================== */
+
+document.addEventListener(
+    'input',
+    event => {
+
+        if (
+            event.target.matches(
+                '.tab-content input[type="number"]'
             )
-        """)
+        ) {
 
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS shifts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                clock_in TEXT,
-                clock_out TEXT,
-                seconds INTEGER,
-                peak_seconds INTEGER,
-                offpeak_seconds INTEGER
-            )
-        """)
+            updateTotal();
 
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS loa_periods (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                start_at TEXT NOT NULL,
-                end_at TEXT,
-                announcement_message_id INTEGER
-            )
-        """)
 
-        # Safe migration for existing duty.db files created before LOA message tracking.
-        loa_columns = {row[1] for row in c.execute("PRAGMA table_info(loa_periods)").fetchall()}
-        if "announcement_message_id" not in loa_columns:
-            c.execute("ALTER TABLE loa_periods ADD COLUMN announcement_message_id INTEGER")
+            /*
+               If search is open and an original input
+               changes for any reason, refresh the
+               search results so the values stay synced.
+            */
 
-
-# ==============================
-# TIME FUNCTIONS
-# ==============================
-
-def fmt_duration(sec):
-    mins = max(0, int(sec)) // 60
-    h, m = divmod(mins, 60)
-
-    return f"{h}h {m:02d}m"
-
-
-def start_loa_period(user_id: int, started_at: datetime):
-    """Record an LOA start and return its database row id."""
-    with db() as c:
-        open_period = c.execute(
-            "SELECT id FROM loa_periods WHERE user_id=? AND end_at IS NULL LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if open_period:
-            return open_period["id"]
-        cursor = c.execute(
-            "INSERT INTO loa_periods(user_id, start_at, end_at, announcement_message_id) VALUES (?, ?, NULL, NULL)",
-            (user_id, started_at.astimezone(TZ).isoformat()),
-        )
-        return cursor.lastrowid
-
-
-def set_loa_announcement_message(period_id: int, message_id: int) -> None:
-    """Save the Discord message id so the bot can edit it on return."""
-    with db() as c:
-        c.execute(
-            "UPDATE loa_periods SET announcement_message_id=? WHERE id=?",
-            (message_id, period_id),
-        )
-
-
-def end_loa_period(user_id: int, ended_at: datetime):
-    """Close the open LOA period and return its saved details."""
-    with db() as c:
-        open_period = c.execute(
-            "SELECT id, start_at, announcement_message_id FROM loa_periods WHERE user_id=? AND end_at IS NULL ORDER BY start_at DESC LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if open_period:
-            c.execute(
-                "UPDATE loa_periods SET end_at=? WHERE id=?",
-                (ended_at.astimezone(TZ).isoformat(), open_period["id"]),
-            )
-            return dict(open_period)
-    return None
-
-
-def loa_days_in_period(user_id: int, period_start: datetime, period_end: datetime) -> int:
-    """Count local calendar days with any overlap with an LOA period."""
-    with db() as c:
-        periods = c.execute(
-            "SELECT start_at, end_at FROM loa_periods WHERE user_id=?",
-            (user_id,),
-        ).fetchall()
-
-    loa_dates = set()
-    for row in periods:
-        start = datetime.fromisoformat(row["start_at"]).astimezone(TZ)
-        end = datetime.fromisoformat(row["end_at"]).astimezone(TZ) if row["end_at"] else period_end
-        overlap_start = max(start, period_start)
-        overlap_end = min(end, period_end)
-        if overlap_end <= overlap_start:
-            continue
-        day = overlap_start.date()
-        last_day = overlap_end.date()
-        while day <= last_day:
-            day_start = datetime.combine(day, time.min, TZ)
-            day_end = day_start + timedelta(days=1)
-            if min(overlap_end, day_end) > max(overlap_start, day_start):
-                loa_dates.add(day)
-            day += timedelta(days=1)
-    return len(loa_dates)
-
-
-def peak_seconds(start, end):
-    """Return seconds inside the daily 19:00–00:00 peak window (Johannesburg time)."""
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=TZ)
-    else:
-        start = start.astimezone(TZ)
-
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=TZ)
-    else:
-        end = end.astimezone(TZ)
-
-    if end <= start:
-        return 0
-
-    total = 0
-    day = start.date()
-    last_day = end.date()
-
-    while day <= last_day:
-        peak_start = datetime.combine(day, PEAK_START, TZ)
-        peak_end = datetime.combine(day + timedelta(days=1), PEAK_END, TZ)
-        overlap_start = max(start, peak_start)
-        overlap_end = min(end, peak_end)
-
-        if overlap_end > overlap_start:
-            total += int((overlap_end - overlap_start).total_seconds())
-
-        day += timedelta(days=1)
-
-    return total
-
-
-# ==============================
-# MANAGEMENT CHECK
-# ==============================
-
-def manager(interaction):
-
-    return (
-        interaction.user.guild_permissions.manage_guild
-        or (
-            MANAGER_ROLE_ID
-            and any(
-                r.id == MANAGER_ROLE_ID
-                for r in interaction.user.roles
-            )
-        )
-    )
-
-
-# ============================================================
-# REFUND MESSAGE MOVER
-# Only handles ✅ reactions in #refunds.
-# This section does not interact with clocking, shifts, or LOA.
-# ============================================================
-
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # Diagnostic log: this tells us whether Discord is delivering reaction events.
-    print(
-        f"Refund mover: reaction event received | channel={payload.channel_id} "
-        f"message={payload.message_id} emoji={str(payload.emoji)!r} "
-        f"user={payload.user_id}"
-    )
-
-    if payload.channel_id != REFUNDS_CHANNEL_ID:
-        return
-
-    if str(payload.emoji) != REFUND_MOVE_EMOJI:
-        print(
-            f"Refund mover: ignored reaction {str(payload.emoji)!r}; "
-            f"expected {REFUND_MOVE_EMOJI!r}."
-        )
-        return
-
-    # Ignore the bot's own reactions.
-    if bot.user and payload.user_id == bot.user.id:
-        return
-
-    try:
-        source_channel = bot.get_channel(REFUNDS_CHANNEL_ID)
-        if source_channel is None:
-            source_channel = await bot.fetch_channel(REFUNDS_CHANNEL_ID)
-
-        destination_channel = bot.get_channel(REFUNDS_COMPLETED_CHANNEL_ID)
-        if destination_channel is None:
-            destination_channel = await bot.fetch_channel(REFUNDS_COMPLETED_CHANNEL_ID)
-    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as e:
-        print(f"Refund mover error: could not access a configured channel: {e}")
-        return
-
-    try:
-        original = await source_channel.fetch_message(payload.message_id)
-    except discord.NotFound:
-        print(f"Refund mover: message {payload.message_id} no longer exists.")
-        return
-    except (discord.Forbidden, discord.HTTPException) as e:
-        print(f"Refund mover error: could not fetch original message: {e}")
-        return
-
-    # Only move webhook-created messages from the price-list website.
-    if original.webhook_id is None:
-        print(
-            f"Refund mover: ignored message {original.id}; it was not sent by a webhook."
-        )
-        return
-
-    try:
-        copied_embeds = [
-            discord.Embed.from_dict(embed.to_dict())
-            for embed in original.embeds
-        ]
-
-        # A webhook transaction should contain an embed; preserve content too if present.
-        if not original.content and not copied_embeds:
-            print(
-                f"Refund mover error: message {original.id} has no text or embeds to copy."
-            )
-            return
-
-        await destination_channel.send(
-            content=original.content or None,
-            embeds=copied_embeds or None,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-        # Delete only after the destination post succeeds.
-        await original.delete()
-        print(
-            f"Refund mover: SUCCESS — moved message {original.id} from "
-            f"channel {REFUNDS_CHANNEL_ID} to {REFUNDS_COMPLETED_CHANNEL_ID}."
-        )
-
-    except discord.Forbidden:
-        print(
-            "Refund mover permission error: grant the bot View Channel and Read Message "
-            "History in #refunds; Send Messages and Embed Links in #refunds-completed; "
-            "and Manage Messages in #refunds."
-        )
-    except discord.HTTPException as e:
-        print(f"Refund mover Discord API error: {e}")
-    except Exception as e:
-        print(f"Refund mover unexpected error: {type(e).__name__}: {e}")
-
-
-# ============================================================
-# LOA ROLE MONITOR
-# ============================================================
-
-@bot.event
-async def on_member_update(before: discord.Member, after: discord.Member):
-    before_has_loa = any(role.id == LOA_ROLE_ID for role in before.roles)
-    after_has_loa = any(role.id == LOA_ROLE_ID for role in after.roles)
-
-    # Ignore member updates unrelated to the LOA role.
-    if before_has_loa == after_has_loa:
-        return
-
-    now = datetime.now(TZ)
-    channel = after.guild.get_channel(LOA_CHANNEL_ID)
-    if channel is None:
-        print(f"LOA channel {LOA_CHANNEL_ID} could not be found.")
-        # Keep the attendance/LOA records accurate even if the channel is unavailable.
-        if not before_has_loa and after_has_loa:
-            start_loa_period(after.id, now)
-        elif before_has_loa and not after_has_loa:
-            end_loa_period(after.id, now)
-        return
-
-    if not before_has_loa and after_has_loa:
-        period_id = start_loa_period(after.id, now)
-        embed = discord.Embed(
-            title="⛔ STAFF MEMBER ON LOA",
-            description=(
-                f"**{after.display_name}** has gone on **Leave of Absence**.\n\n"
-                f"🔴 **Status:** On Leave\n"
-                f"📅 **Start Date:** {now:%d/%m/%Y}\n"
-                f"🕐 **Start Time:** {now:%H:%M} SAST"
-            ),
-            color=discord.Color.orange(),
-            timestamp=now,
-        )
-        embed.set_footer(text="Used-A-Ton Management • This message will be updated when the employee returns")
-        try:
-            message = await channel.send(embed=embed)
-            set_loa_announcement_message(period_id, message.id)
-            print(f"LOA: {after.display_name} went on LOA; announcement saved.")
-        except discord.Forbidden:
-            print("ERROR: I don't have permission to send messages in the LOA channel.")
-        except Exception as e:
-            print(f"LOA announcement error: {e}")
-
-    elif before_has_loa and not after_has_loa:
-        period = end_loa_period(after.id, now)
-        if period:
-            started_at = datetime.fromisoformat(period["start_at"]).astimezone(TZ)
-        else:
-            started_at = now
-        elapsed_seconds = max(0, int((now - started_at).total_seconds()))
-        total_days = (now.date() - started_at.date()).days + 1
-        days, rem = divmod(elapsed_seconds, 86400)
-        hours, rem = divmod(rem, 3600)
-        minutes = rem // 60
-        duration_parts = []
-        if days:
-            duration_parts.append(f"{days} day{'s' if days != 1 else ''}")
-        if hours:
-            duration_parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
-        if minutes or not duration_parts:
-            duration_parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
-        duration_text = ", ".join(duration_parts)
-
-        embed = discord.Embed(
-            title="✅ STAFF MEMBER BACK AT WORK",
-            description=(
-                f"**{after.display_name}** has returned from **Leave of Absence**.\n\n"
-                f"🟢 **Status:** Back at Work\n"
-                f"📅 **Start Date:** {started_at:%d/%m/%Y}\n"
-                f"🕐 **Start Time:** {started_at:%H:%M} SAST\n"
-                f"📅 **End Date:** {now:%d/%m/%Y}\n"
-                f"🕐 **End Time:** {now:%H:%M} SAST\n"
-                f"⏱️ **Total Duration:** {duration_text}\n"
-                f"📆 **Total Calendar Days:** {total_days}"
-            ),
-            color=discord.Color.green(),
-            timestamp=now,
-        )
-        embed.set_footer(text="Used-A-Ton Management • Completed LOA record")
-        try:
-            message_id = period.get("announcement_message_id") if period else None
-            if message_id:
-                try:
-                    original_message = await channel.fetch_message(message_id)
-                    await original_message.edit(embed=embed, content=None)
-                    print(f"LOA: Updated original announcement for {after.display_name}.")
-                    return
-                except discord.NotFound:
-                    print(f"Original LOA announcement for {after.display_name} was not found; posting completed record.")
-            await channel.send(embed=embed)
-            print(f"LOA: {after.display_name} returned to work; completed record posted.")
-        except discord.Forbidden:
-            print("ERROR: I don't have permission to edit or send messages in the LOA channel.")
-        except Exception as e:
-            print(f"LOA announcement error: {e}")
-
-
-# ============================================================
-# DUTY BUTTONS
-# ============================================================
-
-class DutyView(discord.ui.View):
-
-    def __init__(self):
-
-        super().__init__(
-            timeout=None
-        )
-
-
-    @discord.ui.button(
-        label="Clock In",
-        emoji="🟢",
-        style=discord.ButtonStyle.success,
-        custom_id="uat_clock_in"
-    )
-    async def clock_in(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        now = datetime.now(TZ)
-
-        with db() as c:
-
-            row = c.execute(
-                "SELECT clock_in FROM active WHERE user_id=?",
-                (interaction.user.id,)
-            ).fetchone()
-
-            if row:
-
-                return await interaction.response.send_message(
-                    "You are already clocked in.",
-                    ephemeral=True
+            if (
+                document.body.classList.contains(
+                    'searching'
                 )
+            ) {
 
-            c.execute(
-                """
-                INSERT INTO active(user_id,clock_in)
-                VALUES (?,?)
-                """,
-                (
-                    interaction.user.id,
-                    now.isoformat()
-                )
-            )
-            print(f"CLOCK IN saved | user={interaction.user.id} | at={now.isoformat()} | db={os.path.abspath(DB)}")
+                searchItems();
 
-        role = interaction.guild.get_role(
-            ON_DUTY_ROLE_ID
-        )
+            }
 
-        if role:
+        }
 
-            try:
+    }
+);
 
-                await interaction.user.add_roles(
-                    role,
-                    reason="Clocked in"
-                )
 
-            except discord.Forbidden as e:
+/* ========================================================
+   STARTUP
+   ======================================================== */
 
-                print(
-                    f"ROLE ERROR: {e}"
-                )
+document.addEventListener(
+    'DOMContentLoaded',
+    () => {
 
-        await interaction.response.send_message(
-            f"🟢 Clocked in at **{now:%H:%M}**.",
-            ephemeral=True
-        )
+        restoreActiveTab();
 
+        updateTotal();
 
-    @discord.ui.button(
-        label="Clock Out",
-        emoji="🔴",
-        style=discord.ButtonStyle.danger,
-        custom_id="uat_clock_out"
-    )
-    async def clock_out(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
+    }
+);
 
-        now = datetime.now(TZ)
-
-        with db() as c:
-
-            row = c.execute(
-                "SELECT clock_in FROM active WHERE user_id=?",
-                (interaction.user.id,)
-            ).fetchone()
-
-            if not row:
-
-                return await interaction.response.send_message(
-                    "You are not currently clocked in.",
-                    ephemeral=True
-                )
-
-            start = datetime.fromisoformat(
-                row["clock_in"]
-            ).astimezone(TZ)
-
-            seconds = max(
-                0,
-                int(
-                    (now - start).total_seconds()
-                )
-            )
-
-            peak = peak_seconds(
-                start,
-                now
-            )
-
-            off = seconds - peak
-
-            c.execute(
-                "DELETE FROM active WHERE user_id=?",
-                (interaction.user.id,)
-            )
-
-            c.execute(
-                """
-                INSERT INTO shifts(
-                    user_id,
-                    clock_in,
-                    clock_out,
-                    seconds,
-                    peak_seconds,
-                    offpeak_seconds
-                )
-                VALUES (?,?,?,?,?,?)
-                """,
-                (
-                    interaction.user.id,
-                    start.isoformat(),
-                    now.isoformat(),
-                    seconds,
-                    peak,
-                    off
-                )
-            )
-            print(
-                f"CLOCK OUT saved | user={interaction.user.id} | "
-                f"start={start.isoformat()} | end={now.isoformat()} | "
-                f"total={seconds}s | peak={peak}s | db={os.path.abspath(DB)}"
-            )
-
-        role = interaction.guild.get_role(
-            ON_DUTY_ROLE_ID
-        )
-
-        if role:
-
-            try:
-
-                await interaction.user.remove_roles(
-                    role,
-                    reason="Clocked out"
-                )
-
-            except discord.Forbidden:
-
-                pass
-
-        ch = interaction.guild.get_channel(
-            DUTY_LOG_CHANNEL_ID
-        )
-
-        name = interaction.user.display_name
-
-        if ch:
-
-            embed = discord.Embed(
-                title="Used-A-Ton Duty Log",
-                description=(
-                    f"🟢 **{name} — ON DUTY**\n"
-                    f"Clocked in: **{start:%H:%M}**\n\n"
-                    f"🔴 **{name} — OFF DUTY**\n"
-                    f"Clocked out: **{now:%H:%M}**\n\n"
-                    f"**Shift worked: "
-                    f"{fmt_duration(seconds)}**"
-                ),
-                color=discord.Color.from_rgb(255, 105, 180)
-            )
-
-            embed.set_footer(
-                text=f"{start:%d %b %Y} • Africa/Johannesburg"
-            )
-
-            await ch.send(
-                embed=embed
-            )
-
-        await interaction.response.send_message(
-            f"🔴 Clocked out. Shift worked: "
-            f"**{fmt_duration(seconds)}**.",
-            ephemeral=True
-        )
-
-
-# ============================================================
-# POST CLOCK PANEL
-# ============================================================
-
-@bot.tree.command(
-    name="post-clock",
-    description="Post the Used-A-Ton clock-in/out panel"
-)
-async def post_clock(
-    interaction: discord.Interaction
-):
-
-    if not manager(interaction):
-
-        return await interaction.response.send_message(
-            "Management only.",
-            ephemeral=True
-        )
-
-    ch = (
-        interaction.guild.get_channel(
-            CLOCK_CHANNEL_ID
-        )
-        or interaction.channel
-    )
-
-    e = discord.Embed(
-        title="USED-A-TON DUTY CLOCK",
-        description=(
-            "Use the buttons below when starting "
-            "and finishing your shift.\n\n"
-            "🟢 **Clock In** — starts your shift "
-            "and gives the On Duty role.\n"
-            "🔴 **Clock Out** — ends your shift, "
-            "removes the role and records your hours."
-        )
-    )
-
-    await ch.send(
-        embed=e,
-        view=DutyView()
-    )
-
-    await interaction.response.send_message(
-        "Clock panel posted.",
-        ephemeral=True
-    )
-
-
-# ============================================================
-# HOURS
-# ============================================================
-
-@bot.tree.command(
-    name="hours",
-    description="View saved duty hours"
-)
-@app_commands.describe(
-    member="Staff member (leave blank for yourself)"
-)
-async def hours(
-    interaction: discord.Interaction,
-    member: discord.Member | None = None
-):
-
-    target = member or interaction.user
-
-    if (
-        member
-        and member.id != interaction.user.id
-        and not manager(interaction)
-    ):
-
-        return await interaction.response.send_message(
-            "Management only.",
-            ephemeral=True
-        )
-
-    with db() as c:
-
-        r = c.execute(
-            """
-            SELECT
-                COALESCE(SUM(seconds),0) s,
-                COALESCE(SUM(peak_seconds),0) p,
-                COALESCE(SUM(offpeak_seconds),0) o
-            FROM shifts
-            WHERE user_id=?
-            """,
-            (target.id,)
-        ).fetchone()
-
-    await interaction.response.send_message(
-        f"**{target.display_name}**\n"
-        f"Total: **{fmt_duration(r['s'])}**\n"
-        f"Peak (19:00–00:00): **{fmt_duration(r['p'])}**\n"
-        f"Off-peak: **{fmt_duration(r['o'])}**",
-        ephemeral=True
-    )
-
-
-# ============================================================
-# FORCE CLOCK OUT
-# ============================================================
-
-@bot.tree.command(
-    name="force-clockout",
-    description="Management: clock out a staff member now"
-)
-async def force_clockout(
-    interaction: discord.Interaction,
-    member: discord.Member
-):
-
-    if not manager(interaction):
-
-        return await interaction.response.send_message(
-            "Management only.",
-            ephemeral=True
-        )
-
-    now = datetime.now(TZ)
-
-    with db() as c:
-
-        row = c.execute(
-            "SELECT clock_in FROM active WHERE user_id=?",
-            (member.id,)
-        ).fetchone()
-
-        if not row:
-
-            return await interaction.response.send_message(
-                "That member is not clocked in.",
-                ephemeral=True
-            )
-
-        start = datetime.fromisoformat(
-            row["clock_in"]
-        ).astimezone(TZ)
-
-        sec = max(
-            0,
-            int(
-                (now - start).total_seconds()
-            )
-        )
-
-        peak = peak_seconds(
-            start,
-            now
-        )
-
-        c.execute(
-            "DELETE FROM active WHERE user_id=?",
-            (member.id,)
-        )
-
-        c.execute(
-            """
-            INSERT INTO shifts(
-                user_id,
-                clock_in,
-                clock_out,
-                seconds,
-                peak_seconds,
-                offpeak_seconds
-            )
-            VALUES (?,?,?,?,?,?)
-            """,
-            (
-                member.id,
-                start.isoformat(),
-                now.isoformat(),
-                sec,
-                peak,
-                sec - peak
-            )
-        )
-
-    role = interaction.guild.get_role(
-        ON_DUTY_ROLE_ID
-    )
-
-    if role:
-
-        try:
-
-            await member.remove_roles(
-                role
-            )
-
-        except discord.Forbidden:
-
-            pass
-
-    await interaction.response.send_message(
-        f"{member.display_name} clocked out. "
-        f"Shift: **{fmt_duration(sec)}**.",
-        ephemeral=True
-    )
-
-
-# ============================================================
-# DAILY ROSTER REPORT
-# ============================================================
-
-def daily_shift_breakdown(user_id: int, day_start: datetime, day_end: datetime) -> tuple[int, int, int]:
-    """Return peak, non-peak, and total seconds overlapping one local calendar day.
-
-    Peak hours are 19:00–00:00 Africa/Johannesburg time. All other time is non-peak.
-    Shifts crossing midnight are split across the relevant calendar days.
-    """
-    with db() as c:
-        completed = c.execute(
-            "SELECT clock_in, clock_out FROM shifts WHERE user_id=?",
-            (user_id,)
-        ).fetchall()
-        active = c.execute(
-            "SELECT clock_in FROM active WHERE user_id=?",
-            (user_id,)
-        ).fetchone()
-
-    intervals = []
-    for row in completed:
-        if not row["clock_in"] or not row["clock_out"]:
-            continue
-        start = datetime.fromisoformat(row["clock_in"]).astimezone(TZ)
-        end = datetime.fromisoformat(row["clock_out"]).astimezone(TZ)
-        intervals.append((start, end))
-
-    # Include a shift that is still active when the report runs.
-    if active:
-        start = datetime.fromisoformat(active["clock_in"]).astimezone(TZ)
-        intervals.append((start, min(datetime.now(TZ), day_end)))
-
-    total_seconds = 0
-    peak_total = 0
-    for start, end in intervals:
-        overlap_start = max(start, day_start)
-        overlap_end = min(end, day_end)
-        if overlap_end <= overlap_start:
-            continue
-
-        total_seconds += int((overlap_end - overlap_start).total_seconds())
-
-        # Use the same peak-window calculation as clock-out and weekly reporting.
-        peak_total += peak_seconds(overlap_start, overlap_end)
-
-    non_peak_total = max(0, total_seconds - peak_total)
-    return peak_total, non_peak_total, total_seconds
-
-
-@tasks.loop(time=DAILY_REPORT_TIMES)
-async def daily_roster_report():
-    now = datetime.now(TZ)
-    # The daily task wakes at both times, but only posts at the correct
-    # time for that day: Sunday 23:55; Monday-Saturday 23:59.
-    is_sunday = now.weekday() == 6
-    if is_sunday and (now.hour, now.minute) != (23, 55):
-        return
-    if not is_sunday and (now.hour, now.minute) != (23, 59):
-        return
-
-    if not DAILY_ROSTER_WEBHOOK_URL:
-        print("Daily roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
-        return
-
-    day_start = datetime.combine(now.date(), time.min, TZ)
-    # Include active shifts up to the scheduled daily report time.
-    day_end = now
-
-    # Use the configured guild, or the first available guild if no ID is set.
-    guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
-    if guild is None:
-        print("Daily roster skipped: bot could not find the Discord server.")
-        return
-
-    with db() as c:
-        ids = set(row[0] for row in c.execute(
-            "SELECT DISTINCT user_id FROM shifts WHERE clock_in < ? AND clock_out > ?",
-            (day_end.isoformat(), day_start.isoformat())
-        ).fetchall())
-        ids.update(row[0] for row in c.execute("SELECT user_id FROM active").fetchall())
-
-    lines = []
-    for user_id in ids:
-        peak_seconds_today, non_peak_seconds_today, total_seconds_today = daily_shift_breakdown(
-            user_id, day_start, day_end
-        )
-        if total_seconds_today <= 0:
-            continue
-        member = guild.get_member(user_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(user_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                member = None
-        name = member.display_name if member else f"Discord user {user_id}"
-        lines.append((
-            name.casefold(),
-            f"**{discord.utils.escape_markdown(name)}**\n"
-            f"Peak: {fmt_duration(peak_seconds_today)}\n"
-            f"Non Peak: {fmt_duration(non_peak_seconds_today)}\n"
-            f"Total Shift: {fmt_duration(total_seconds_today)}"
-        ))
-
-    lines.sort(key=lambda item: item[0])
-    report_cutoff = "23:55" if is_sunday else "23:59"
-    heading = f"**({now:%A - %d/%m/%Y}): 00:00 - {report_cutoff}**"
-    roster = "\n\n".join(line for _, line in lines)
-    content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded today."
-
-    try:
-        webhook = discord.Webhook.from_url(DAILY_ROSTER_WEBHOOK_URL, client=bot)
-        await webhook.send(content=content, username="Used-A-Ton Daily Roster", allowed_mentions=discord.AllowedMentions.none())
-        print(f"Daily roster posted for {now:%Y-%m-%d}.")
-    except Exception as e:
-        print(f"Daily roster webhook error: {e}")
-
-
-@tasks.loop(time=WEEKLY_REPORT_TIME)
-async def weekly_roster_report():
-    """Post weekly staff totals every Sunday at 23:59 local time."""
-    now = datetime.now(TZ)
-    # Python weekday: Monday=0, Sunday=6.
-    if now.weekday() != 6:
-        return
-
-    if not DAILY_ROSTER_WEBHOOK_URL:
-        print("Weekly roster skipped: DAILY_ROSTER_WEBHOOK_URL is not configured.")
-        return
-
-    # Reporting week is [Monday 00:01, following Monday 00:00),
-    # which includes all of Sunday through 23:59:59.999999.
-    sunday = now.date()
-    monday = sunday - timedelta(days=6)
-    week_start = datetime.combine(monday, time(0, 1), TZ)
-    week_end = datetime.combine(sunday + timedelta(days=1), time.min, TZ)
-
-    guild = bot.get_guild(GUILD_ID) if GUILD_ID else (bot.guilds[0] if bot.guilds else None)
-    if guild is None:
-        print("Weekly roster skipped: bot could not find the Discord server.")
-        return
-
-    with db() as c:
-        ids = set(row[0] for row in c.execute("SELECT DISTINCT user_id FROM shifts").fetchall())
-        ids.update(row[0] for row in c.execute("SELECT user_id FROM active").fetchall())
-        ids.update(row[0] for row in c.execute(
-            "SELECT DISTINCT user_id FROM loa_periods WHERE start_at < ? AND (end_at IS NULL OR end_at > ?)",
-            (week_end.isoformat(), week_start.isoformat()),
-        ).fetchall())
-
-    lines = []
-    for user_id in ids:
-        with db() as c:
-            completed = c.execute(
-                "SELECT clock_in, clock_out FROM shifts WHERE user_id=?", (user_id,)
-            ).fetchall()
-            active = c.execute(
-                "SELECT clock_in FROM active WHERE user_id=?", (user_id,)
-            ).fetchone()
-
-        intervals = []
-        for row in completed:
-            if not row["clock_in"] or not row["clock_out"]:
-                continue
-            start = datetime.fromisoformat(row["clock_in"]).astimezone(TZ)
-            end = datetime.fromisoformat(row["clock_out"]).astimezone(TZ)
-            intervals.append((start, end))
-        if active:
-            start = datetime.fromisoformat(active["clock_in"]).astimezone(TZ)
-            intervals.append((start, min(now, week_end)))
-
-        total_seconds_week = 0
-        peak_seconds_week = 0
-        # Track which kinds of time each person actually worked on each day.
-        peak_by_day = {}
-        non_peak_by_day = {}
-        for start, end in intervals:
-            overlap_start = max(start, week_start)
-            overlap_end = min(end, week_end)
-            if overlap_end <= overlap_start:
-                continue
-
-            total_seconds_week += int((overlap_end - overlap_start).total_seconds())
-            current_day = overlap_start.date()
-            while current_day <= overlap_end.date():
-                day_start = datetime.combine(current_day, time.min, TZ)
-                day_end = min(datetime.combine(current_day + timedelta(days=1), time.min, TZ), week_end)
-                day_overlap_start = max(overlap_start, day_start)
-                day_overlap_end = min(overlap_end, day_end)
-                if day_overlap_end > day_overlap_start:
-                    day_seconds = int((day_overlap_end - day_overlap_start).total_seconds())
-                    peak_today = peak_seconds(day_overlap_start, day_overlap_end)
-                    non_peak_today = max(0, day_seconds - peak_today)
-                    peak_by_day[current_day] = peak_by_day.get(current_day, 0) + peak_today
-                    non_peak_by_day[current_day] = non_peak_by_day.get(current_day, 0) + non_peak_today
-                    peak_seconds_week += peak_today
-                current_day += timedelta(days=1)
-
-        non_peak_seconds_week = max(0, total_seconds_week - peak_seconds_week)
-        worked_peak_days = {day for day, seconds in peak_by_day.items() if seconds > 0}
-        worked_non_peak_days = {day for day, seconds in non_peak_by_day.items() if seconds > 0}
-        mixed_days = worked_peak_days & worked_non_peak_days
-
-        if peak_seconds_week > 0 and non_peak_seconds_week <= 0:
-            shift_type = "Shift A"
-            weekly_target_seconds = 5 * 60 * 60
-            target_basis_seconds = peak_seconds_week
-        elif non_peak_seconds_week > 0 and peak_seconds_week <= 0:
-            shift_type = "Shift B"
-            weekly_target_seconds = 7 * 60 * 60
-            target_basis_seconds = non_peak_seconds_week
-        elif mixed_days:
-            # Shift D normally requires 6 total hours. If 5 peak hours are
-            # reached, reclassify the member as Shift A.
-            if peak_seconds_week >= 5 * 60 * 60:
-                shift_type = "Shift A"
-                weekly_target_seconds = 5 * 60 * 60
-                target_basis_seconds = peak_seconds_week
-            else:
-                shift_type = "Shift D"
-                weekly_target_seconds = 6 * 60 * 60
-                target_basis_seconds = total_seconds_week
-        elif worked_peak_days and worked_non_peak_days:
-            shift_type = "Shift C"
-            weekly_target_seconds = 7 * 60 * 60
-            target_basis_seconds = total_seconds_week
-        else:
-            # LOA-only staff retain the mixed-shift target until classified.
-            shift_type = "Not classified"
-            weekly_target_seconds = 7 * 60 * 60
-            target_basis_seconds = total_seconds_week
-
-        loa_days = loa_days_in_period(user_id, week_start, week_end)
-        daily_target_seconds = int(weekly_target_seconds / 7)
-        adjusted_target_seconds = max(0, weekly_target_seconds - loa_days * daily_target_seconds)
-        target_shortfall = max(0, adjusted_target_seconds - target_basis_seconds)
-        target_status = (
-            "Target met" if target_basis_seconds >= adjusted_target_seconds
-            else f"Short by {fmt_duration(target_shortfall)}"
-        )
-        if total_seconds_week <= 0 and loa_days <= 0:
-            continue
-
-        member = guild.get_member(user_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(user_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                member = None
-        name = member.display_name if member else f"Discord user {user_id}"
-        display_shift_type = shift_type.replace("Shift ", "")
-        exceeding_seconds = (
-            max(0, total_seconds_week - adjusted_target_seconds)
-            if shift_type == "Shift A" else 0
-        )
-        message = (
-            f"**{discord.utils.escape_markdown(name)}**\n"
-            f"Shift Type: {display_shift_type}\n"
-            f"LOA Days: {loa_days}\n"
-            f"Required Hours: {fmt_duration(adjusted_target_seconds)}\n"
-            f"Total Hours: {fmt_duration(total_seconds_week)}\n"
-            f"Peak: {fmt_duration(peak_seconds_week)}\n"
-            f"Non Peak: {fmt_duration(non_peak_seconds_week)}\n"
-            f"Exceeding Hours: {fmt_duration(exceeding_seconds)}\n"
-            f"Status: {target_status}"
-        )
-        lines.append((name.casefold(), message))
-
-    lines.sort(key=lambda item: item[0])
-    heading = f"**Weekly Staff Roster (Monday - {monday:%d/%m/%Y} to Sunday - {sunday:%d/%m/%Y}): Monday 00:01 - Sunday 23:59**"
-    roster = "\n\n".join(line for _, line in lines)
-    content = f"{heading}\n\n{roster}" if roster else f"{heading}\n\nNo staff hours recorded this week."
-
-    try:
-        webhook = discord.Webhook.from_url(DAILY_ROSTER_WEBHOOK_URL, client=bot)
-        await webhook.send(content=content, username="Used-A-Ton Weekly Roster", allowed_mentions=discord.AllowedMentions.none())
-        print(f"Weekly roster posted for {monday:%Y-%m-%d} to {sunday:%Y-%m-%d}.")
-    except Exception as e:
-        print(f"Weekly roster webhook error: {e}")
-
-
-@daily_roster_report.before_loop
-async def before_daily_roster_report():
-    await bot.wait_until_ready()
-
-
-@weekly_roster_report.before_loop
-async def before_weekly_roster_report():
-    await bot.wait_until_ready()
-
-
-# ============================================================
-# BOT READY
-# ============================================================
-
-@bot.event
-async def on_ready():
-
-    bot.add_view(
-        DutyView()
-    )
-
-    try:
-
-        if GUILD_ID:
-
-            guild = discord.Object(
-                id=GUILD_ID
-            )
-
-            bot.tree.copy_global_to(
-                guild=guild
-            )
-
-            await bot.tree.sync(
-                guild=guild
-            )
-
-        else:
-
-            await bot.tree.sync()
-
-    except Exception as e:
-
-        print(
-            "Command sync error:",
-            e
-        )
-
-    print(
-        f"Logged in as {bot.user}"
-    )
-
-    print(
-        f"LOA monitoring enabled | "
-        f"Role: {LOA_ROLE_ID} | "
-        f"Channel: {LOA_CHANNEL_ID}"
-    )
-
-    if not daily_roster_report.is_running():
-        daily_roster_report.start()
-
-    if not weekly_roster_report.is_running():
-        weekly_roster_report.start()
-
-    print(f"Roster schedules | Daily: every day at 23:55 {TZ} | Weekly: Sundays at 23:59 {TZ}")
-
-    # Start tracking any existing LOA roles from this startup onward.
-    # Their original start dates cannot be inferred from Discord's current role state.
-    now = datetime.now(TZ)
-    for guild in bot.guilds:
-        for member in guild.members:
-            if any(role.id == LOA_ROLE_ID for role in member.roles):
-                start_loa_period(member.id, now)
-
-
-# ============================================================
-# START
-# ============================================================
-
-init_db()
-
-if not TOKEN:
-
-    raise RuntimeError(
-        "DISCORD_TOKEN is missing. "
-        "Copy .env.example to .env and add your token."
-    )
-
-bot.run(TOKEN)
+</script>
+</body>
+</html>
