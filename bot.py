@@ -229,33 +229,36 @@ def loa_days_in_period(user_id: int, period_start: datetime, period_end: datetim
 
 
 def peak_seconds(start, end):
+    """Return seconds inside the daily 19:00–00:00 peak window (Johannesburg time)."""
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=TZ)
+    else:
+        start = start.astimezone(TZ)
 
-    total = 0.0
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=TZ)
+    else:
+        end = end.astimezone(TZ)
+
+    if end <= start:
+        return 0
+
+    total = 0
     day = start.date()
+    last_day = end.date()
 
-    while day <= end.date():
+    while day <= last_day:
+        peak_start = datetime.combine(day, PEAK_START, TZ)
+        peak_end = datetime.combine(day + timedelta(days=1), PEAK_END, TZ)
+        overlap_start = max(start, peak_start)
+        overlap_end = min(end, peak_end)
 
-        p1 = datetime.combine(
-            day,
-            PEAK_START,
-            TZ
-        )
-
-        p2 = datetime.combine(
-            day + timedelta(days=1),
-            PEAK_END,
-            TZ
-        )
-
-        a = max(start, p1)
-        b = min(end, p2)
-
-        if b > a:
-            total += (b - a).total_seconds()
+        if overlap_end > overlap_start:
+            total += int((overlap_end - overlap_start).total_seconds())
 
         day += timedelta(days=1)
 
-    return int(total)
+    return total
 
 
 # ==============================
@@ -927,13 +930,8 @@ def daily_shift_breakdown(user_id: int, day_start: datetime, day_end: datetime) 
 
         total_seconds += int((overlap_end - overlap_start).total_seconds())
 
-        # Intersect the shift with the daily peak window, 19:00 to 00:00.
-        peak_start = datetime.combine(day_start.date(), PEAK_START, TZ)
-        peak_end = datetime.combine(day_start.date() + timedelta(days=1), PEAK_END, TZ)
-        peak_overlap_start = max(overlap_start, peak_start)
-        peak_overlap_end = min(overlap_end, peak_end)
-        if peak_overlap_end > peak_overlap_start:
-            peak_total += int((peak_overlap_end - peak_overlap_start).total_seconds())
+        # Use the same peak-window calculation as clock-out and weekly reporting.
+        peak_total += peak_seconds(overlap_start, overlap_end)
 
     non_peak_total = max(0, total_seconds - peak_total)
     return peak_total, non_peak_total, total_seconds
@@ -1080,11 +1078,7 @@ async def weekly_roster_report():
                 day_overlap_end = min(overlap_end, day_end)
                 if day_overlap_end > day_overlap_start:
                     day_seconds = int((day_overlap_end - day_overlap_start).total_seconds())
-                    peak_start = datetime.combine(current_day, PEAK_START, TZ)
-                    peak_end = datetime.combine(current_day + timedelta(days=1), PEAK_END, TZ)
-                    peak_overlap_start = max(day_overlap_start, peak_start)
-                    peak_overlap_end = min(day_overlap_end, peak_end)
-                    peak_today = int((peak_overlap_end - peak_overlap_start).total_seconds()) if peak_overlap_end > peak_overlap_start else 0
+                    peak_today = peak_seconds(day_overlap_start, day_overlap_end)
                     non_peak_today = max(0, day_seconds - peak_today)
                     peak_by_day[current_day] = peak_by_day.get(current_day, 0) + peak_today
                     non_peak_by_day[current_day] = non_peak_by_day.get(current_day, 0) + non_peak_today
